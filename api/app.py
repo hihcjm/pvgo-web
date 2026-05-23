@@ -335,6 +335,126 @@ def get_beta_from_soup(soup):
     """레거시 호환용 — wisereport로 대체됨."""
     return 1.0
 
+# ── 6b. FnGuide 현금흐름표 (영업활동CF + CAPEX) ──────────────────
+def get_fnguide_cashflow(stock_code):
+    """
+    comp.fnguide.com에서 연결 현금흐름표 파싱.
+    반환: {
+      '2023/12': {'op_cf': 42782, 'capex': 83251, 'fcf': -40469},
+      '2024/12': {'op_cf': 297959, 'capex': 159455, 'fcf': 138504},
+      ...
+    }
+    연도-값 딕셔너리. 실패 시 None.
+    """
+    try:
+        url = (f'https://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp'
+               f'?pGB=1&gicode=A{stock_code}&cID=&MenuYn=Y&ReportGB='
+               f'&NewMenuID=104&stkGb=701')
+        headers = {**NAVER_HEADERS, 'Referer': 'https://comp.fnguide.com'}
+        resp = requests.get(url, headers=headers, timeout=20)
+        if resp.status_code != 200:
+            return None
+        resp.encoding = 'utf-8'
+        soup = BeautifulSoup(resp.text, 'html.parser')
+
+        tables = soup.find_all('table')
+        # 연결 현금흐름 테이블: thead='IFRS(연결)' + tbody[4]
+        # table[4] = 연간 연결 현금흐름표
+        cf_table = None
+        cf_years = []
+        for t in tables:
+            thead = t.find('thead')
+            if thead:
+                ths = [th.get_text(strip=True) for th in thead.find_all('th')]
+                if 'IFRS(연결)' in ths and any(re.search(r'20\d\d/\d\d', th) for th in ths):
+                    cf_years = [th for th in ths if re.search(r'20\d\d/\d\d', th)]
+                    tbody = t.find('tbody')
+                    if tbody:
+                        # 첫 번째 행이 '영업활동으로인한현금흐름'인지 확인
+                        rows = tbody.find_all('tr')
+                        if rows:
+                            first_text = rows[0].find('th') or rows[0].find('td')
+                            if first_text and '영업활동' in first_text.get_text():
+                                cf_table = tbody
+                                break
+
+        if cf_table is None:
+            # fallback: tbody[4] 직접 접근
+            tbodies = soup.find_all('tbody')
+            if len(tbodies) >= 5:
+                cf_table = tbodies[4]
+                # 연도는 table[4] thead에서
+                all_tables = soup.find_all('table')
+                if len(all_tables) >= 5:
+                    th_row = all_tables[4].find('thead')
+                    if th_row:
+                        cf_years = [th.get_text(strip=True)
+                                    for th in th_row.find_all('th')
+                                    if re.search(r'20\d\d/\d\d', th.get_text())]
+
+        if cf_table is None or not cf_years:
+            return None
+
+        def parse_val(s):
+            s = s.strip().replace(',', '').replace(' ', '')
+            if s in ('-', '', 'N/A', '-'):
+                return None
+            try:
+                return float(s)
+            except:
+                return None
+
+        result = {}
+        rows = cf_table.find_all('tr')
+
+        # 행별 값 추출 함수
+        def get_row_vals(row):
+            cells = row.find_all('td')
+            return [parse_val(c.get_text(strip=True)) for c in cells]
+
+        op_cf_vals   = None   # 영업활동으로인한현금흐름
+        capex_vals   = None   # 유형자산의증가
+
+        for r in rows:
+            th = r.find('th')
+            label = th.get_text(strip=True) if th else ''
+            # 그룹 제목 행이 없으면 첫 번째 td로
+            if not label:
+                first_td = r.find('td')
+                label = first_td.get_text(strip=True) if first_td else ''
+
+            # '계산에 참여한 계정 펼치기' 등 설명 제거
+            clean = re.sub(r'계산에 참여한 계정 펼치기', '', label).strip()
+
+            if '영업활동으로인한현금흐름' in clean and op_cf_vals is None:
+                op_cf_vals = get_row_vals(r)
+            elif '유형자산의증가' in clean and capex_vals is None:
+                capex_vals = get_row_vals(r)
+
+            if op_cf_vals and capex_vals:
+                break
+
+        if not op_cf_vals:
+            return None
+
+        for i, yr in enumerate(cf_years):
+            # yr = '2023/12'
+            y_norm = norm_year(yr)   # '2023/12'
+            op_cf = op_cf_vals[i] if i < len(op_cf_vals) else None
+            capex = capex_vals[i] if capex_vals and i < len(capex_vals) else None
+            if op_cf is not None:
+                fcf = op_cf - (capex or 0)
+                result[y_norm] = {
+                    'op_cf': round(op_cf),
+                    'capex': round(capex) if capex is not None else 0,
+                    'fcf':   round(fcf),
+                }
+
+        return result if result else None
+
+    except Exception as e:
+        return None
+
 # ── 7. 밴드 분석 ───────────────────────────────────────────────
 def calc_valuation_band(naver_data, current_price):
     rows     = naver_data['rows']
@@ -471,12 +591,12 @@ def calc_valuation_band(naver_data, current_price):
 
     return results
 
-# ── 8. DCF (FCF 직접 사용 + 컨센서스 26~28E) ─────────────────
+# ── 8. DCF (FnGuide 실제 FCF 우선 사용 + 컨센서스 26~28E) ───────
 def calc_dcf(naver_data, r, current_price, g_terminal=0.025, stock_code=None):
     """
-    네이버 Financial Summary의 FCF를 직접 사용.
-    과거 FCF/매출액 마진 평균 → 컨센서스 매출액에 적용해 26~28E FCFF 추정.
-    발행주식수도 테이블에서 직접 읽음.
+    FnGuide 현금흐름표에서 실제 FCF(영업활동CF - CAPEX)를 가져와 사용.
+    부족 시 영업이익 기반 추정으로 대체.
+    컨센서스 매출 × 평균FCF마진 → 26~28E FCFF 추정.
     """
     try:
         rows     = naver_data['rows']
@@ -485,24 +605,39 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025, stock_code=None):
         est_idx  = naver_data['est_idx']
 
         rev_row = rows.get('매출액', [])
-        fcf_row = rows.get('FCF', [])
-        op_row  = rows.get('영업이익(발표)', rows.get('영업이익', []))
 
         if not rev_row:
             return {"error": "매출액 데이터 없음"}
 
-        # ── 과거 FCF 마진 계산 (FCF가 있으면 직접, 없으면 영업이익 기반) ──
-        hist_fcff_margin = []
-        hist_fcf_detail  = []   # 화면 표시용: [(year, fcf_억, margin_%)]
-        for i in hist_idx:
-            rev = get_val(rows, '매출액', i)
-            fcf = safe_float(fcf_row[i]) if i < len(fcf_row) else None
-            if rev and rev > 0 and fcf is not None:
-                margin = fcf / rev
-                hist_fcff_margin.append(margin)
-                hist_fcf_detail.append({'year': years[i], 'fcf': round(fcf), 'margin': round(margin*100,1), 'src': '직접'})
+        # ── FnGuide 실제 FCF 가져오기 (영업활동CF - CAPEX) ──────────
+        fnguide_cf = None
+        if stock_code:
+            fnguide_cf = get_fnguide_cashflow(stock_code)
 
-        # FCF 데이터 부족시 영업이익 기반으로 대체
+        # ── 과거 FCF 마진 계산 ─────────────────────────────────────
+        # 우선순위: ① FnGuide 실제 FCF → ② 영업이익 기반 추정
+        hist_fcff_margin = []
+        hist_fcf_detail  = []   # 화면 표시용
+
+        if fnguide_cf:
+            for i in hist_idx:
+                yr = years[i]   # '2023/12', '2024/12' 등
+                rev = get_val(rows, '매출액', i)
+                cf_data = fnguide_cf.get(yr)
+                if rev and rev > 0 and cf_data:
+                    fcf = cf_data['fcf']   # 억원
+                    margin = fcf / rev
+                    hist_fcff_margin.append(margin)
+                    hist_fcf_detail.append({
+                        'year': yr,
+                        'fcf': round(fcf),
+                        'op_cf': cf_data['op_cf'],
+                        'capex': cf_data['capex'],
+                        'margin': round(margin*100, 1),
+                        'src': 'FnGuide실적',
+                    })
+
+        # FnGuide 데이터 부족시 영업이익 기반 추정
         if len(hist_fcff_margin) < 2:
             TAX = 0.22; DA = 0.05; CAPEX_R = 0.06
             hist_fcff_margin = []
@@ -534,21 +669,14 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025, stock_code=None):
             rev_growth = 0.05  # fallback 5%
 
         # ── 컨센서스 FCF 추정 (26E) ──
+        # FnGuide 실적 기반 마진 × 컨센서스 매출 적용
         fcf_years = []
         for i in est_idx:
             label = years[i]
             rev_e = get_val(rows, '매출액', i)
-            op_e  = get_val(rows, '영업이익(발표)', i) or get_val(rows, '영업이익', i)
-            fcf_e_direct = safe_float(fcf_row[i]) if i < len(fcf_row) else None
-
-            if fcf_e_direct is not None and fcf_e_direct > 0:
-                fcf_years.append((label, fcf_e_direct, rev_e, '컨센서스'))
-            elif rev_e and op_e and op_e > 0:
-                TAX = 0.22; DA = 0.05; CAPEX_R = 0.06
-                fcff_e = op_e*(1-TAX) + rev_e*DA - rev_e*CAPEX_R
+            if rev_e:
+                fcff_e = rev_e * avg_fcff_margin
                 fcf_years.append((label, fcff_e, rev_e, '컨센서스'))
-            elif rev_e:
-                fcf_years.append((label, rev_e * avg_fcff_margin, rev_e, '컨센서스'))
 
         if not fcf_years:
             return {"error": "컨센서스 FCF 추정 불가"}
