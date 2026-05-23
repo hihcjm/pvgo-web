@@ -1,7 +1,37 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
-.env
-.venv
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 가상환경
 venv/
+.venv/
+env/
+.env/
+
+# 환경변수
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vercel
+.vercel/
+
+# Claude Code
 .claude/

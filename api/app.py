@@ -110,54 +110,6 @@ def calc_pvgo(base_val, roe, payout_ratio, r):
         "price": f"{growth_value:,.0f}",
     }
 
-def extract_year_label(col_name):
-    """컬럼명에서 연도 레이블 추출. 예: '2024/12' → '2024', '2026E' → '2026E'"""
-    s = str(col_name)
-    if re.search(r'\dE', s, re.IGNORECASE):
-        m = re.search(r'(\d{4})E', s, re.IGNORECASE)
-        return m.group(1) + 'E' if m else s
-    m = re.search(r'(\d{4})', s)
-    return m.group(1) if m else s
-
-def calc_window_valuations(df, r_value, current_price):
-    """3컬럼 슬라이딩 윈도우로 연도별 DDM 가치평가 결과 리스트 반환.
-    base_val: 해당 연도(end 컬럼) 단일 EPS / ROE·DPS: 3년 평균
-    """
-    eps_row = find_row(df, ["EPS"])
-    roe_row = find_row(df, ["ROE"])
-    dps_row = find_row(df, ["DPS"])
-    n_cols = len(df.columns)
-    results = []
-
-    for start in range(1, n_cols - 1):
-        end = start + 2
-        if end >= n_cols:
-            break
-
-        year_label = extract_year_label(df.columns[end])
-        eps = safe_float(eps_row.iloc[end]) if eps_row is not None else None
-        eps_pos = get_avg(eps_row, start, end, positive_only=True)
-        roe = get_avg(roe_row, start, end)
-        dps = get_avg(dps_row, start, end)
-        roe_r = (roe / 100) if roe is not None else 0.10
-
-        def _payout(d, e):
-            if d is not None and e is not None and e > 0:
-                return d / e
-            return 0.30
-
-        val = calc_pvgo(eps, roe_r, _payout(dps, eps_pos), r_value)
-
-        if current_price and val.get('price'):
-            theory = float(val['price'].replace(',', ''))
-            diff = theory - current_price
-            diff_pct = diff / current_price * 100
-            val['diff'] = f"{diff:+,.0f}"
-            val['diff_pct'] = f"{diff_pct:+.1f}"
-
-        results.append({"year": year_label, "result": val})
-
-    return results
 
 
 def calc_peg(per_val, eps_row, start_col, end_col):
