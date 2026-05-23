@@ -513,7 +513,15 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025):
 
         avg_fcff_margin = sum(hist_fcff_margin) / len(hist_fcff_margin)
 
-        # ── 컨센서스 FCF 추정 (26E~28E) ──
+        # ── 과거 매출 성장률 CAGR 계산 ──
+        rev_hist = [get_val(rows, '매출액', i) for i in hist_idx]
+        rev_hist = [v for v in rev_hist if v and v > 0]
+        if len(rev_hist) >= 2:
+            rev_growth = (rev_hist[-1] / rev_hist[0]) ** (1 / (len(rev_hist) - 1)) - 1
+        else:
+            rev_growth = 0.05  # fallback 5%
+
+        # ── 컨센서스 FCF 추정 (26E) ──
         fcf_years = []
         for i in est_idx:
             label = years[i]
@@ -522,16 +530,33 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025):
             fcf_e_direct = safe_float(fcf_row[i]) if i < len(fcf_row) else None
 
             if fcf_e_direct is not None and fcf_e_direct > 0:
-                fcf_years.append((label, fcf_e_direct))
+                fcf_years.append((label, fcf_e_direct, rev_e, '컨센서스'))
             elif rev_e and op_e and op_e > 0:
                 TAX = 0.22; DA = 0.05; CAPEX_R = 0.06
                 fcff_e = op_e*(1-TAX) + rev_e*DA - rev_e*CAPEX_R
-                fcf_years.append((label, fcff_e))
+                fcf_years.append((label, fcff_e, rev_e, '컨센서스'))
             elif rev_e:
-                fcf_years.append((label, rev_e * avg_fcff_margin))
+                fcf_years.append((label, rev_e * avg_fcff_margin, rev_e, '컨센서스'))
 
         if not fcf_years:
             return {"error": "컨센서스 FCF 추정 불가"}
+
+        # ── 컨센서스 이후 연도 마진 기반 연장 (총 3개년이 될 때까지) ──
+        TOTAL_PROJ_YEARS = 3
+        last_label = fcf_years[-1][0]           # '2026/12(E)'
+        last_rev_e = fcf_years[-1][2]           # 마지막 컨센서스 매출
+        yr_m = re.search(r'(\d{4})/(\d{2})', last_label)
+        base_year = int(yr_m.group(1)) if yr_m else 2026
+        month_str = yr_m.group(2) if yr_m else '12'
+
+        extra_needed = TOTAL_PROJ_YEARS - len(fcf_years)
+        for k in range(1, extra_needed + 1):
+            next_year  = base_year + k
+            next_label = f"{next_year}/{month_str}(E)"
+            rev_ext    = last_rev_e * (1 + rev_growth) ** k if last_rev_e else None
+            if rev_ext:
+                fcf_ext = rev_ext * avg_fcff_margin
+                fcf_years.append((next_label, fcf_ext, rev_ext, '마진추정'))
 
         if r <= g_terminal:
             return {"error": f"할인율({r*100:.1f}%)이 터미널성장률({g_terminal*100:.1f}%)보다 낮음"}
@@ -557,7 +582,7 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025):
 
         pv_fcfs = []
         cumulative_pv = 0
-        for t_idx, (label, fcf_e) in enumerate(fcf_years):
+        for t_idx, (label, fcf_e, _rev, src) in enumerate(fcf_years):
             n = t_idx + 1
             pv = fcf_e / (1+r)**n
             cumulative_pv += pv
@@ -566,8 +591,10 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025):
             total_pv_n = cumulative_pv + pv_tv_n
             fv_n = pv_to_price(total_pv_n)
             d, dp = diff_str(fv_n)
+            # 마진추정 연도는 레이블에 * 표시
+            display_label = f"{label}*" if src == '마진추정' else label
             pv_fcfs.append({
-                "year": label, "fcf": round(fcf_e), "pv": round(pv),
+                "year": display_label, "fcf": round(fcf_e), "pv": round(pv),
                 "pv_tv": round(pv_tv_n), "total_pv": round(total_pv_n),
                 "fair_value": f"{fv_n:,.0f}", "diff": d, "diff_pct": dp,
             })
@@ -577,6 +604,7 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025):
             "avg_tax_rate":    22.0,
             "g_terminal":      round(g_terminal*100, 1),
             "r":               round(r*100, 2),
+            "rev_growth":      round(rev_growth*100, 1),
             "pv_fcfs":         pv_fcfs,
         }
     except Exception as e:
