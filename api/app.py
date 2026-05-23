@@ -66,16 +66,9 @@ def get_naver_finance(stock_code):
     if resp.status_code != 200:
         return None
 
-    # 인코딩 감지 후 디코딩 (서버 환경에 따라 UTF-8 or EUC-KR)
-    for enc in ('utf-8', 'euc-kr', 'cp949'):
-        try:
-            html_text = resp.content.decode(enc)
-            break
-        except (UnicodeDecodeError, LookupError):
-            continue
-    else:
-        html_text = resp.content.decode('utf-8', errors='replace')
-    tables = pd.read_html(io.StringIO(html_text))
+    # requests가 HTTP 헤더 charset을 자동 감지해 디코딩
+    resp.encoding = resp.apparent_encoding or 'utf-8'
+    tables = pd.read_html(io.StringIO(resp.text))
 
     # 재무 테이블 찾기: 컬럼이 튜플이고 '매출액' 행이 있는 테이블
     fin_table = None
@@ -210,15 +203,8 @@ def get_beta_naver(stock_code):
     try:
         url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
         resp = requests.get(url, headers=NAVER_HEADERS, timeout=15)
-        for enc in ('utf-8', 'euc-kr', 'cp949'):
-            try:
-                html_text = resp.content.decode(enc)
-                break
-            except (UnicodeDecodeError, LookupError):
-                continue
-        else:
-            html_text = resp.content.decode('utf-8', errors='replace')
-        tables = pd.read_html(io.StringIO(html_text))
+        resp.encoding = resp.apparent_encoding or 'utf-8'
+        tables = pd.read_html(io.StringIO(resp.text))
         for t in tables:
             for col in t.columns:
                 for i, v in enumerate(t[col].astype(str)):
