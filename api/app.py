@@ -643,6 +643,22 @@ def calc_rolling_dcf(naver_data, rf, current_price, stock_code=None, life_cycle=
         rev_latest  = to_T(get_latest('매출액'))
         op_latest   = to_T(get_latest('영업이익'))
         ebit_margin = (op_latest / rev_latest) if rev_latest > 0 else 0.1
+
+        # ── 역사적 매출 CAGR 계산 (최대 3~4년치) ──────────────────
+        # 네이버 히스토리는 최신순 → 오래된 순으로 정렬됨
+        rev_hist = []
+        for i in hist_idx_desc:
+            v = to_T(get_val(rows, '매출액', i))
+            if v and v > 0:
+                rev_hist.append(v)
+        rev_cagr = None
+        if len(rev_hist) >= 2:
+            # 가장 최근 vs 가장 오래된 구간의 CAGR
+            n_yrs = len(rev_hist) - 1
+            if rev_hist[-1] > 0:
+                raw_cagr = (rev_hist[0] / rev_hist[-1]) ** (1.0 / n_yrs) - 1.0
+                # 비정상적 CAGR 클램핑: -10% ~ 50%
+                rev_cagr = max(-0.10, min(raw_cagr, 0.50))
         
         # 발행주식수
         # 네이버 증권 '발행주식수' 행은 주(株) 단위 정수로 반환됨
@@ -736,7 +752,11 @@ def calc_rolling_dcf(naver_data, rf, current_price, stock_code=None, life_cycle=
         engine = DamodaranDCF(fin, rf=rf, erp=0.075, beta=beta)
 
         # 생애주기에 따른 결과 산출
-        res = engine.calculate_intrinsic_value(stage=life_cycle)
+        # rev_cagr: 역사적 매출 CAGR → 고성장기의 g_base 보정에 사용
+        stage_kwargs = {}
+        if life_cycle == 2 and rev_cagr is not None:
+            stage_kwargs['rev_cagr'] = rev_cagr
+        res = engine.calculate_intrinsic_value(stage=life_cycle, **stage_kwargs)
 
         import datetime
         current_year = datetime.date.today().year
@@ -783,6 +803,12 @@ def calc_rolling_dcf(naver_data, rf, current_price, stock_code=None, life_cycle=
             'survival_prob': 1.0,
         }]
 
+        # terminal_g: decline에서는 g_decline(음수)이 저장되므로, 표시용은 항상 양수 rf 기준
+        terminal_g_display = res.get('terminal_g', rf)
+        if terminal_g_display is not None and terminal_g_display < 0:
+            terminal_g_display = rf   # 쇠퇴기는 별도 표시하지 않고 rf 기준
+        terminal_g_display = max(terminal_g_display or rf, 0.0)
+
         return {
             'stage':           stage_names.get(life_cycle, 'High-Growth'),
             'life_cycle':      life_cycle,
@@ -790,13 +816,14 @@ def calc_rolling_dcf(naver_data, rf, current_price, stock_code=None, life_cycle=
             'wacc_start':      round(res['wacc'] * 100, 2),
             'wacc_end':        round(res['wacc'] * 100, 2),
             'rf':              round(rf * 100, 2),
-            'terminal_g':      round(res.get('terminal_g', rf) * 100, 2),
+            'terminal_g':      round(terminal_g_display * 100, 2),
             'industry_margin': round(ebit_margin * 100, 1),
             'tax_rate':        round(tax_rate * 100, 1),
             'stc':             1.0,
             'survival_prob':   1.0,
             'roic_base':       round(res.get('roic_base', 0) * 100, 1) if res.get('roic_base') is not None else None,
             'g_base':          round(res.get('g_base', 0)    * 100, 1) if res.get('g_base')    is not None else None,
+            'rev_cagr':        round(rev_cagr * 100, 1) if rev_cagr is not None else None,
             'targets':         targets,
             'schedule':        schedule,
         }

@@ -645,7 +645,10 @@
         &nbsp;·&nbsp; 기초 ROIC <strong>{{ rd.roic_base }}%</strong>
         {% endif %}
         {% if rd.g_base is not none %}
-        &nbsp;·&nbsp; 내재성장률 <strong>{{ rd.g_base }}%</strong>
+        &nbsp;·&nbsp; g_base <strong>{{ rd.g_base }}%</strong>
+        {% endif %}
+        {% if rd.rev_cagr is not none %}
+        &nbsp;·&nbsp; 매출 CAGR <strong>{{ rd.rev_cagr }}%</strong>
         {% endif %}
       </span>
     </div>

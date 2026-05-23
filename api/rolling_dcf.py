@@ -418,8 +418,9 @@ class DamodaranDCF:
 
     def _high_growth_valuation(
         self,
-        g_override:   Optional[float] = None,
+        g_override:    Optional[float] = None,
         roic_override: Optional[float] = None,
+        rev_cagr:      Optional[float] = None,
         **kwargs,
     ) -> dict:
         """
@@ -431,23 +432,40 @@ class DamodaranDCF:
         Phase 2 (t=6~10) : 이행기 — ROIC가 WACC로 선형 Fading
         Phase 3 (t=11~∞) : 영구기 — ROIC = WACC (초과이익 소멸), g_terminal = rf
 
-        핵심 공식
-        ---------
-        내재성장률  g = ROIC × Reinvestment_Rate
-        이행기 ROIC : roic_t = roic_base * (1−α) + wacc * α   (α: 0→1)
-        이행기 g    : g_t    = g_base   * (1−α) + rf   * α
-        재투자율    : rr_t   = g_t / roic_t
-        FCFF_t      : NOPAT_t × (1 − rr_t)
+        성장률 g_base 결정 우선순위:
+        ① g_override 명시 시 사용
+        ② rev_cagr (역사적 매출 CAGR) 가중 평균:
+           g_base = rev_cagr × 0.5 + (ROIC × RR) × 0.5
+           → 재무제표 RR 역산 오류를 역사적 성장률로 보정
+        ③ ROIC × RR (순수 내재성장률, 하한 보정 포함)
 
         Parameters
         ----------
         g_override    : 성장률 직접 지정 (None이면 ROIC×RR로 계산)
         roic_override : ROIC 직접 지정  (None이면 내부 추정)
+        rev_cagr      : 역사적 매출 CAGR (None이면 ROIC×RR만 사용)
         """
-        roic   = roic_override if roic_override is not None else self._base_roic()
+        roic    = roic_override if roic_override is not None else self._base_roic()
         rr_base = self._base_reinvestment_rate()
-        g_base  = g_override   if g_override   is not None else (roic * rr_base)
-        g_base  = min(g_base, 0.35)   # 내재성장률 상한 35% (스타트업 아닌 경우)
+        g_roic  = roic * rr_base   # 순수 내재성장률
+
+        if g_override is not None:
+            g_base = g_override
+        elif rev_cagr is not None and rev_cagr > 0:
+            # 역사적 매출 CAGR과 내재성장률의 가중 평균
+            # rev_cagr이 더 신뢰할 수 있는 성장률 proxy
+            g_base = rev_cagr * 0.6 + g_roic * 0.4
+        else:
+            g_base = g_roic
+
+        # ROIC × RR이 너무 낮은 경우(CapEx≈DA로 RR이 극소) 하한 보정:
+        # NOPAT 성장률 = EBIT × (1-t)의 최근 추세가 있다면 반영
+        # 단순 하한: WACC의 절반 (기업이 자본비용의 절반은 성장에 재투자)
+        g_floor = self.wacc * 0.5
+        if g_base < g_floor and rev_cagr is None and g_override is None:
+            g_base = g_floor
+
+        g_base = min(g_base, 0.40)   # 내재성장률 상한 40%
 
         nopat_base  = self._nopat()
         current_nopat = nopat_base
@@ -499,7 +517,8 @@ class DamodaranDCF:
 
         # ── Phase 3: 영구 성장기 ─────────────────────────────────────────────
         # ROIC = WACC → 초과이익 0 → rr_terminal = g / WACC
-        g_terminal   = min(g_base, self.rf)           # ≤ 무위험수익률 (엄격 규칙)
+        # [엄격 규칙] 영구성장률은 반드시 양수이며 rf 이하
+        g_terminal   = max(min(g_base, self.rf), 0.01)  # 1% 하한 ~ rf 상한
         rr_terminal  = g_terminal / max(self.wacc, 0.001)
         nopat_t11    = current_nopat * (1 + g_terminal)
         fcf_t11      = nopat_t11 * (1 - rr_terminal)
