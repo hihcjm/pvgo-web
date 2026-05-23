@@ -587,7 +587,7 @@ def calc_valuation_band(naver_data, current_price):
     return results
 
 # ── 8. Rolling DCF (Damodaran 7-Stage Lifecycle) ─────────────────
-def calc_rolling_dcf(naver_data, r, current_price, stock_code=None):
+def calc_rolling_dcf(naver_data, rf, current_price, stock_code=None):
     """
     네이버 크롤링 데이터 → rolling_dcf 7-Stage 모듈로 변환.
     - 한국 기업은 억원 단위 → 조원(T)으로 변환 후 $B 동일 구조로 처리
@@ -625,17 +625,24 @@ def calc_rolling_dcf(naver_data, r, current_price, stock_code=None):
             """억원 → 조원"""
             return v / UNIT if v is not None else None
 
+        # 네이버 hist_idx는 오래된→최신 순서 (예: [0,1,2] = 2023,2024,2025)
+        # 최신 데이터를 먼저 가져오려면 reversed 사용
+        hist_idx_asc  = list(hist_idx)          # 오래된→최신 (연도 오름차순)
+        hist_idx_desc = list(reversed(hist_idx)) # 최신→오래된 (연도 내림차순)
+
         def get_latest(key):
-            for i in hist_idx:
+            """최신 연도 값부터 반환 (hist_idx 역순)"""
+            for i in hist_idx_desc:
                 v = get_val(rows, key, i)
                 if v is not None: return v
             return None
 
         def get_two_latest(key):
-            vals = [(get_val(rows, key, i), i) for i in hist_idx if get_val(rows, key, i) is not None]
+            """최신 2개 연도 값 반환 (최신, 직전)"""
+            vals = [get_val(rows, key, i) for i in hist_idx_desc if get_val(rows, key, i) is not None]
             if len(vals) >= 2:
-                return vals[0][0], vals[1][0]
-            return (vals[0][0] if vals else None, None)
+                return vals[0], vals[1]
+            return (vals[0] if vals else None, None)
 
         rev_latest_raw, rev_prev_raw = get_two_latest('매출액')
         op_latest_raw                = get_latest('영업이익')
@@ -647,19 +654,21 @@ def calc_rolling_dcf(naver_data, r, current_price, stock_code=None):
         ebit_margin    = (op_latest / rev_latest) if op_latest is not None and rev_latest else 0.0
         rev_growth_act = ((rev_latest / rev_prev) - 1) if rev_prev and rev_prev > 0 else 0.05
 
-        # ── 과거 EBIT 마진 시계열 (Cyclical 감지용) ─────────────────
+        # ── 과거 EBIT 마진 시계열 (Cyclical 감지용, 최신→오래된 순) ──
         hist_ebit_margins = []
-        for i in hist_idx:
+        for i in hist_idx_desc:
             rev_i = to_T(get_val(rows, '매출액', i))
             op_i  = to_T(get_val(rows, '영업이익', i))
             if rev_i and rev_i > 0 and op_i is not None:
                 hist_ebit_margins.append(op_i / rev_i)
 
-        # ── 과거 매출 성장률 시계열 (Declining 감지 + Extrapolation용) ─
-        rev_all_T = [to_T(get_val(rows, '매출액', i)) for i in hist_idx]
+        # ── 과거 매출 성장률 시계열 (Declining 감지용, 최신→오래된 순) ─
+        # rev_all_T[0]=최신, rev_all_T[1]=직전, ...
+        rev_all_T = [to_T(get_val(rows, '매출액', i)) for i in hist_idx_desc]
         rev_all_T = [v for v in rev_all_T if v is not None and v > 0]
         hist_rev_growth: list[float] = []
         for i in range(len(rev_all_T) - 1):
+            # [0]/[1]-1 = 최신/직전 - 1 = 최근 성장률 (양수 = 성장)
             hist_rev_growth.append(rev_all_T[i] / rev_all_T[i+1] - 1)
         hist_rev_growth = hist_rev_growth[:5]
 
@@ -715,11 +724,6 @@ def calc_rolling_dcf(naver_data, r, current_price, stock_code=None):
         else:
             debt_T = 0.0
 
-        # ── rf 역산 ──────────────────────────────────────────────────
-        # r = rf + beta*ERP(5%), 한국 ERP 5% 가정
-        rf = r - 0.05
-        rf = max(rf, 0.025)
-
         # ── Financials ──────────────────────────────────────────────
         actuals = Financials(
             revenue           = rev_latest,
@@ -759,25 +763,42 @@ def calc_rolling_dcf(naver_data, r, current_price, stock_code=None):
             if yr_m:
                 available_est_years.append((int(yr_m.group(1)), i))
 
+        # 과거 실적 마진 범위 (신뢰도 검증용)
+        hist_margin_max = max(hist_ebit_margins) if hist_ebit_margins else 0.40
+        hist_margin_avg = sum(hist_ebit_margins) / len(hist_ebit_margins) if hist_ebit_margins else ebit_margin
+
         for target_yr in (2026, 2027, 2028):
             matched = next((i for yr, i in available_est_years if yr == target_yr), None)
             if matched is not None:
-                rev_v  = to_T(get_val(rows, '매출액', matched)) or rev_latest * (1 + max(rev_growth_act, 0.03))
-                op_v   = to_T(get_val(rows, '영업이익', matched))
-                if op_v is not None and rev_v and rev_v > 0:
-                    margin_est = op_v / rev_v
+                rev_raw = to_T(get_val(rows, '매출액', matched))
+                op_raw  = to_T(get_val(rows, '영업이익', matched))
+
+                # ── 매출 신뢰도 검증 ────────────────────────────────
+                # 전년 대비 50% 초과 성장이면 네이버 데이터 이상으로 판단 → 과거 성장률로 대체
+                prev_rev_ref = consensus_years[-1].revenue if consensus_years else rev_latest
+                if rev_raw and rev_raw > prev_rev_ref * 1.5:
+                    rev_v = prev_rev_ref * (1 + max(rev_growth_act, 0.03))
+                    op_raw = None  # 매출이 이상하면 마진도 신뢰 불가
+                else:
+                    rev_v = rev_raw or prev_rev_ref * (1 + max(rev_growth_act, 0.03))
+
+                # ── 마진 신뢰도 검증 ────────────────────────────────
+                if op_raw is not None and rev_v and rev_v > 0:
+                    margin_raw = op_raw / rev_v
+                    # 과거 최고 마진의 2배 초과 시 이상값 → 과거 평균 마진 사용
+                    if margin_raw > hist_margin_max * 2.0:
+                        margin_est = hist_margin_avg
+                    else:
+                        margin_est = margin_raw
                 else:
                     margin_est = ebit_margin
             else:
                 # 이전 추정치 또는 최근 실적에서 성장률 연장
-                if consensus_years:
-                    prev_rev_c = consensus_years[-1].revenue
-                else:
-                    prev_rev_c = rev_latest
+                prev_rev_c = consensus_years[-1].revenue if consensus_years else rev_latest
                 rev_v      = prev_rev_c * (1 + max(rev_growth_act, 0.03))
                 margin_est = ebit_margin
 
-            # -1.0 floor: 컨센서스 마진이 -2~-5배로 역산될 경우 방지
+            # 마진 범위 클램핑: -1.0 ~ +0.60
             margin_est = max(min(margin_est, 0.60), -1.0)
             consensus_years.append(ConsensusYear(
                 year        = target_yr,
@@ -818,7 +839,8 @@ def calc_rolling_dcf(naver_data, r, current_price, stock_code=None):
         for yr, row in targets_df.iterrows():
             tp     = float(row['target_price'])
             # tp = equity(조원) / shares(조주) = 원/주 (단위 일관성 유지)
-            tp_won = round(tp * 1e12 / (shares_k * 1000))  # 조원 → 원/주
+            # rolling_dcf.py의 target_price는 이미 원/주 단위임
+            tp_won = round(tp)
             upside = round((tp_won - current_price) / current_price * 100, 1) if current_price and current_price > 0 else None
             targets.append({
                 'year':           int(yr),
@@ -838,6 +860,27 @@ def calc_rolling_dcf(naver_data, r, current_price, stock_code=None):
                 'target_price_raw': tp_won,
                 'upside_pct':     upside,
             })
+
+        return {
+            'stage':           stage,
+            'horizon':         cfg.horizon,
+            'wacc_start':      round(cfg.wacc_start * 100, 2),
+            'wacc_end':        round(cfg.wacc_end   * 100, 2),
+            'rf':              round(rf * 100, 2),
+            'terminal_g':      round(rf * 100, 2),
+            'industry_margin': round(industry_margin * 100, 1),
+            'tax_rate':        round(tax * 100, 1),
+            'stc':             round(stc, 2),
+            'survival_prob':   round(cfg.survival_prob, 2),
+            'target_margin':   round(cfg.target_margin * 100, 1),
+            'schedule':        schedule,
+            'targets':         targets,
+            'unit':            '조원',
+        }
+
+    except Exception:
+        import traceback
+        return {"error": traceback.format_exc()}
 
         return {
             'stage':           stage,
@@ -962,7 +1005,7 @@ def analyze_stock(company_name):
                 "div_yield": round(div_yield, 2) if div_yield else None,
                 "debt_ratio":round(debt_ratio, 1)if debt_ratio else None,
             },
-            "rdcf":  calc_rolling_dcf(naver_data, r_value, current_price, stock_code=stock_code),
+            "rdcf":  calc_rolling_dcf(naver_data, rf, current_price, stock_code=stock_code),
             "band":  calc_valuation_band(naver_data, current_price),
             "tp":    tp_data,
         }
