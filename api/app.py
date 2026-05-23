@@ -777,7 +777,8 @@ def calc_rolling_dcf(naver_data, r, current_price, stock_code=None):
                 rev_v      = prev_rev_c * (1 + max(rev_growth_act, 0.03))
                 margin_est = ebit_margin
 
-            margin_est = max(min(margin_est, 0.60), -5.0)
+            # -1.0 floor: 컨센서스 마진이 -2~-5배로 역산될 경우 방지
+            margin_est = max(min(margin_est, 0.60), -1.0)
             consensus_years.append(ConsensusYear(
                 year        = target_yr,
                 revenue     = rev_v,

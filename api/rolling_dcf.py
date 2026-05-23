@@ -265,6 +265,9 @@ class FinancialProjector:
     applying stage-specific safety guards.
     """
 
+    # Stages where negative FCF = investment funded by raised capital, not destruction of value
+    EARLY_STAGES = ("Pre-Revenue", "Start-up")
+
     def consensus_to_fcf(
         self,
         consensus: list[ConsensusYear],
@@ -276,25 +279,39 @@ class FinancialProjector:
         """
         Convert 2026-2028 consensus to FCF rows.
         Reinvestment = DeltaRev / S2C (capped at Rev * max_reinv_pct_rev).
+
+        Damodaran rule for Pre-Revenue / Start-up:
+          Negative FCF during investment phase is funded by capital already
+          raised (equity/debt issuance), NOT a cash outflow that reduces EV.
+          → fcf_for_dcf = max(raw_fcf, 0)  for early-stage firms only.
+          The raw FCF is still stored for display; only dcf_fcf is 0-floored.
         """
+        # Clamp consensus EBIT margins for early-stage firms
+        # EPS-derived margins can be wildly negative (e.g. -250%) due to
+        # share-count mismatch; cap at -100% to prevent runaway negatives.
+        margin_floor = -1.0 if cfg.stage in self.EARLY_STAGES else -5.0
+
         rows: list[dict] = []
         prev_rev = actuals.revenue
 
         for c in sorted(consensus, key=lambda x: x.year):
-            ebit  = c.revenue * c.ebit_margin
-            nopat = ebit * (1 - tax_rate)
-            reinv = min(
+            margin = max(c.ebit_margin, margin_floor)
+            ebit   = c.revenue * margin
+            nopat  = ebit * (1 - tax_rate)
+            reinv  = min(
                 (c.revenue - prev_rev) / cfg.sales_to_capital,
                 c.revenue * cfg.max_reinv_pct_rev,
             )
-            fcf = nopat - reinv
+            raw_fcf = nopat - reinv
+            # Damodaran: early-stage negative FCF = funded investment, not value loss
+            fcf = max(raw_fcf, 0.0) if cfg.stage in self.EARLY_STAGES else raw_fcf
             g   = (c.revenue / prev_rev - 1) if prev_rev and prev_rev > 0 else 0.0
 
             rows.append({
                 "year":         c.year,
                 "revenue":      round(c.revenue, 4),
                 "rev_growth":   round(g * 100, 2),
-                "ebit_margin":  round(c.ebit_margin * 100, 2),
+                "ebit_margin":  round(margin * 100, 2),
                 "ebit":         round(ebit, 4),
                 "nopat":        round(nopat, 4),
                 "reinvestment": round(reinv, 4),
@@ -318,6 +335,12 @@ class FinancialProjector:
         Extrapolate [last_consensus+1 .. last_consensus+horizon+1] FCF rows.
         +1 extra row = FCF_final+1 used as Terminal Value numerator.
         Applies all stage-specific guards.
+
+        Damodaran early-stage rule (Pre-Revenue / Start-up):
+          Seed margin is clamped to -1.0 floor (consensus may give -2.5x etc).
+          Negative FCF during convergence phase is 0-floored for DCF purposes:
+          the firm is presumed to fund losses via capital raises, not asset sales.
+          Once margin turns positive the full FCF is used.
         """
         sorted_con  = sorted(consensus, key=lambda c: c.year)
         last        = sorted_con[-1]
@@ -329,7 +352,9 @@ class FinancialProjector:
         else:
             seed_g = actuals.revenue_growth
 
-        seed_m = last.ebit_margin
+        # Clamp seed margin for early-stage (consensus EBIT can be -250% etc.)
+        margin_floor = -1.0 if cfg.stage in self.EARLY_STAGES else -5.0
+        seed_m = max(last.ebit_margin, margin_floor)
 
         # Declining: ensure growth starts negative or near zero
         if cfg.stage == "Declining":
@@ -379,7 +404,10 @@ class FinancialProjector:
             if cfg.stage == "Declining":
                 reinv = max(reinv, 0.0)
 
-            fcf = nopat - reinv
+            raw_fcf = nopat - reinv
+
+            # Damodaran: early-stage negative FCF = funded by capital raises
+            fcf = max(raw_fcf, 0.0) if cfg.stage in self.EARLY_STAGES else raw_fcf
 
             # ── WACC for this step ────────────────────────────────
             wacc_t = _wacc_at_step(cfg, min(step, cfg.horizon))
@@ -489,10 +517,12 @@ class RollingDCFEngine:
                 pv_fcfs += fcf_yr / cum_fac
 
             # Terminal Value
+            # TV numerator must be positive (negative terminal FCF = no value)
             if tv_year in all_df.index:
                 fcf_tv = float(all_df.loc[tv_year, "fcf"])
             else:
                 fcf_tv = float(all_df.iloc[-1]["fcf"])
+            fcf_tv = max(fcf_tv, 0.0)   # negative terminal FCF → TV = 0
 
             tv_wacc = cfg.wacc_end
             spread  = tv_wacc - rf
@@ -502,8 +532,11 @@ class RollingDCFEngine:
             cum_tv = self._cumulative_discount(wacc_sched, base_year, tv_year)
             pv_tv  = tv_undiscounted / cum_tv
 
-            ev           = (pv_fcfs + pv_tv) * cfg.survival_prob
+            # EV: survival prob applied; never negative (worst case = 0)
+            ev           = max((pv_fcfs + pv_tv) * cfg.survival_prob, 0.0)
             base_cash    = rolling_cash.get(base_year, actuals.cash)
+            # For early-stage: rolling cash uses RAISED capital, not cumulative FCF
+            # (already 0-floored FCF means cash doesn't drain from operating losses)
             equity_value = ev + base_cash - actuals.debt
             target_price = equity_value / actuals.shares if actuals.shares > 0 else float("nan")
 
