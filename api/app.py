@@ -513,9 +513,14 @@ def analyze_stock(company_name):
         return {"error": f"'{company_name}'(을)를 찾을 수 없습니다."}
 
     try:
-        naver_data = get_naver_finance(stock_code)
+        try:
+            naver_data = get_naver_finance(stock_code)
+        except Exception as e:
+            import traceback
+            return {"error": f"[get_naver_finance 오류] {traceback.format_exc()}"}
+
         if naver_data is None:
-            return {"error": "네이버 증권에서 재무 데이터를 가져오지 못했습니다."}
+            return {"error": f"네이버 증권에서 재무 데이터를 가져오지 못했습니다. (code={stock_code})"}
 
         current_price = get_current_price(stock_code)
         rf   = get_risk_free_rate()
@@ -537,9 +542,8 @@ def analyze_stock(company_name):
         }
 
     except Exception as e:
-        err_msg = str(e)
-        if len(err_msg) > 200 or '<html' in err_msg.lower():
-            err_msg = "데이터 수집 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+        import traceback
+        err_msg = traceback.format_exc()
         return {"error": f"서버 처리 중 오류: {err_msg}"}
 
 
