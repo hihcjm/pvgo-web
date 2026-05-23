@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 class Financials:
     """Latest-year actuals snapshot."""
     revenue:              float          # T-won (조원)
+    ebit:                 float          # T-won (조원)
     ebit_margin:          float          # fraction
     tax_rate:             float          # fraction
     depr_amort:           float          # T-won

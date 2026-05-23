@@ -678,6 +678,7 @@ def calc_rolling_dcf(naver_data, rf, current_price, stock_code=None, life_cycle=
 
         fin = Financials(
             revenue           = rev_latest,
+            ebit              = op_latest,
             ebit_margin       = ebit_margin,
             tax_rate          = tax_rate,
             depr_amort        = depr_amort_T,
