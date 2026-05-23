@@ -424,80 +424,77 @@ class DamodaranDCF:
         **kwargs,
     ) -> dict:
         """
-        Option 2: 고성장기 — 3-Stage Bottom-Up
+        Option 2: 고성장기 — 3-Stage Bottom-Up (Damodaran 방법론)
 
         구조
         ----
-        Phase 1 (t=1~5)  : 고성장기 — 현재 ROIC·재투자율 유지
-        Phase 2 (t=6~10) : 이행기 — ROIC가 WACC로 선형 Fading
-        Phase 3 (t=11~∞) : 영구기 — ROIC = WACC (초과이익 소멸), g_terminal = rf
+        Phase 1 (t=1~5)  : 고성장기 — g_base 유지, RR=g/ROIC
+        Phase 2 (t=6~10) : 이행기  — g와 ROIC 모두 rf/WACC로 선형 수렴
+        Phase 3 (t=11~∞) : 영구기  — g=g_terminal(≤rf), ROIC=WACC
 
-        성장률 g_base 결정 우선순위:
-        ① g_override 명시 시 사용
-        ② rev_cagr (역사적 매출 CAGR) 가중 평균:
-           g_base = rev_cagr × 0.5 + (ROIC × RR) × 0.5
-           → 재무제표 RR 역산 오류를 역사적 성장률로 보정
-        ③ ROIC × RR (순수 내재성장률, 하한 보정 포함)
+        성장률(g_base) 결정 로직
+        -----------------------
+        1순위: g_override 명시값
+        2순위: rev_cagr (역사적 매출 CAGR) — 가장 신뢰도 높은 성장 입력
+               단, rev_cagr > ROIC이면 RR=1에 걸리므로 min(rev_cagr, ROIC*0.85)
+        3순위: ROIC × RR_base (재무제표 역산)
+        하한:  max(rf × 1.5, WACC × 0.4) — 성장주 최소 성장 보장
 
-        Parameters
-        ----------
-        g_override    : 성장률 직접 지정 (None이면 ROIC×RR로 계산)
-        roic_override : ROIC 직접 지정  (None이면 내부 추정)
-        rev_cagr      : 역사적 매출 CAGR (None이면 ROIC×RR만 사용)
+        RR = g / ROIC 공식의 의미
+        --------------------------
+        Damodaran의 Reinvestment Rate = g / ROIC 는
+        "성장률 g를 달성하기 위해 NOPAT의 몇 %를 재투자해야 하나"를 나타냄.
+        g가 높으면 RR도 높아져 단기 FCFF가 줄지만, 고성장이 지속되면
+        장기 Terminal Value가 이를 상쇄하므로 전체 EV는 증가함.
+        이것이 Damodaran 모델의 정상 동작임.
         """
         roic    = roic_override if roic_override is not None else self._base_roic()
         rr_base = self._base_reinvestment_rate()
-        g_roic  = roic * rr_base   # 순수 내재성장률
+        g_roic  = roic * max(rr_base, 0.0)
 
+        # ── g_base 결정 ─────────────────────────────────────────────────────
         if g_override is not None:
-            g_base = g_override
+            g_base = float(g_override)
         elif rev_cagr is not None and rev_cagr > 0:
-            # 역사적 매출 CAGR과 내재성장률의 가중 평균
-            # rev_cagr이 더 신뢰할 수 있는 성장률 proxy
-            g_base = rev_cagr * 0.6 + g_roic * 0.4
+            # rev_cagr을 직접 사용 (블렌딩 최소화)
+            # ROIC 제약: RR=g/ROIC가 95%를 넘지 않도록 g 상한 설정
+            g_max_by_roic = roic * 0.90   # RR ≤ 90%
+            g_base = min(rev_cagr, g_max_by_roic)
+            # 단, g_roic가 더 높으면 g_roic도 고려
+            g_base = max(g_base, g_roic)
         else:
             g_base = g_roic
 
-        # ROIC × RR이 너무 낮은 경우(CapEx≈DA로 RR이 극소) 하한 보정:
-        # NOPAT 성장률 = EBIT × (1-t)의 최근 추세가 있다면 반영
-        # 단순 하한: WACC의 절반 (기업이 자본비용의 절반은 성장에 재투자)
-        g_floor = self.wacc * 0.5
-        if g_base < g_floor and rev_cagr is None and g_override is None:
+        # ── 하한 보정 ───────────────────────────────────────────────────────
+        # 고성장 기업 지정 시 최소한 rf*1.5 이상은 성장해야 함
+        g_floor = max(self.rf * 1.5, self.wacc * 0.4)
+        if g_base < g_floor and g_override is None:
             g_base = g_floor
 
-        g_base = min(g_base, 0.40)   # 내재성장률 상한 40%
+        g_base = min(g_base, 0.40)   # 절대 상한 40%
 
-        nopat_base  = self._nopat()
+        nopat_base    = self._nopat()
         current_nopat = nopat_base
-
-        fcffs   = []
-        pv_fcff = 0.0
-        pv_stage1 = 0.0
-        pv_stage2 = 0.0
+        fcffs, pv_fcff, pv_stage1, pv_stage2 = [], 0.0, 0.0, 0.0
 
         for t in range(1, 11):
             if t <= 5:
-                # ── Phase 1: 고성장기 ───────────────────────────────────────
                 g_t    = g_base
                 roic_t = roic
                 phase  = "high_growth"
             else:
-                # ── Phase 2: 이행기 (Fading) ────────────────────────────────
-                # α: t=6 → 0.2, t=7 → 0.4, ... t=10 → 1.0
                 alpha  = (t - 5) / 5.0
                 g_t    = g_base * (1 - alpha) + self.rf * alpha
-                roic_t = roic   * (1 - alpha) + self.wacc * alpha
-                roic_t = max(roic_t, self._GUARD_ROIC_FLOOR)
+                roic_t = max(roic * (1 - alpha) + self.wacc * alpha,
+                             self._GUARD_ROIC_FLOOR)
                 phase  = "transition"
 
-            # 재투자율 = g / ROIC (동적 계산 — 내재성장률 공식 역산)
-            rr_t = g_t / roic_t
-            rr_t = max(0.0, min(rr_t, self._GUARD_REINV_MAX))
+            # RR = g / ROIC (Damodaran 핵심 공식)
+            rr_t = max(0.0, min(g_t / roic_t, self._GUARD_REINV_MAX))
 
-            # NOPAT 성장 (매출 성장 → 마진 유지 가정)
             current_nopat *= (1 + g_t)
-            fcf_t = current_nopat * (1 - rr_t)
-            pv_t  = fcf_t * self._pv_factor(self.wacc, t)
+            fcf_t  = current_nopat * (1 - rr_t)
+            pv_t   = fcf_t * self._pv_factor(self.wacc, t)
             pv_fcff += pv_t
             if t <= 5:
                 pv_stage1 += pv_t
@@ -506,36 +503,34 @@ class DamodaranDCF:
 
             fcffs.append({
                 "year":       t,
-                "growth_g":   round(g_t,         4),
-                "roic":       round(roic_t,       4),
-                "reinv_rate": round(rr_t,         4),
+                "growth_g":   round(g_t,          4),
+                "roic":       round(roic_t,        4),
+                "reinv_rate": round(rr_t,          4),
                 "nopat":      round(current_nopat, 4),
-                "fcf":        round(fcf_t,        4),
-                "pv_fcf":     round(pv_t,         4),
+                "fcf":        round(fcf_t,         4),
+                "pv_fcf":     round(pv_t,          4),
                 "phase":      phase,
             })
 
         # ── Phase 3: 영구 성장기 ─────────────────────────────────────────────
-        # ROIC = WACC → 초과이익 0 → rr_terminal = g / WACC
-        # [엄격 규칙] 영구성장률은 반드시 양수이며 rf 이하
-        g_terminal   = max(min(g_base, self.rf), 0.01)  # 1% 하한 ~ rf 상한
-        rr_terminal  = g_terminal / max(self.wacc, 0.001)
-        nopat_t11    = current_nopat * (1 + g_terminal)
-        fcf_t11      = nopat_t11 * (1 - rr_terminal)
-        tv           = fcf_t11 / max(self.wacc - g_terminal, 0.001)
-        pv_tv        = tv * self._pv_factor(self.wacc, 10)
+        # g_terminal = min(g_base, rf) — 절대로 무위험수익률 초과 불가
+        g_terminal  = max(min(g_base, self.rf), 0.01)
+        rr_terminal = g_terminal / max(self.wacc, 0.001)
+        nopat_t11   = current_nopat * (1 + g_terminal)
+        fcf_t11     = nopat_t11 * (1 - rr_terminal)
+        tv          = fcf_t11 / max(self.wacc - g_terminal, 0.001)
+        pv_tv       = tv * self._pv_factor(self.wacc, 10)
 
         ev = pv_fcff + pv_tv
-
         extra = {
             "stage":             "high_growth",
-            "g_base":            round(g_base,      4),
-            "roic_base":         round(roic,         4),
-            "rr_base":           round(rr_base,      4),
-            "terminal_g":        round(g_terminal,   4),
-            "pv_stage1":         round(pv_stage1,    4),
-            "pv_stage2":         round(pv_stage2,    4),
-            "pv_terminal_value": round(pv_tv,        4),
+            "g_base":            round(g_base,    4),
+            "roic_base":         round(roic,       4),
+            "rr_base":           round(rr_base,    4),
+            "terminal_g":        round(g_terminal, 4),
+            "pv_stage1":         round(pv_stage1,  4),
+            "pv_stage2":         round(pv_stage2,  4),
+            "pv_terminal_value": round(pv_tv,      4),
         }
         return self._equity_bridge(ev, fcffs, extra)
 
