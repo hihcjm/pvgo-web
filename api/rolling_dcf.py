@@ -58,10 +58,10 @@ class Financials:
     ebit_margin:          float          # fraction (negative OK)
     revenue_growth:       float          # TTM YoY fraction
     cash:                 float          # $B or T-won
-    st_investments:       float          = 0.0  # short-term investments
     debt:                 float          # $B or T-won
-    minority_interest:    float          = 0.0  # minority interest (subtract from EV)
     shares:               float          # B-shares or T-shares
+    st_investments:       float          = 0.0  # short-term investments
+    minority_interest:    float          = 0.0  # minority interest (subtract from EV)
     depr_amort:           float          = 0.0  # D&A for FCF calculation
     capex:                float          = 0.0  # CapEx for Reinvestment Rate
     hist_ebit_margins:    list[float]    = field(default_factory=list)  # last <=10Y
