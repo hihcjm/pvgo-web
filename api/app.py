@@ -6,6 +6,7 @@ import re
 import math
 import os
 import io
+from bs4 import BeautifulSoup
 
 template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'templates')
 app = Flask(__name__, template_folder=template_dir)
@@ -57,63 +58,83 @@ def get_stock_code(company_name):
         return None
 
 # ── 2. 네이버 PC Financial Summary 크롤링 ─────────────────────
-def get_naver_finance(stock_code):
-    """
-    finance.naver.com/item/main.naver 의 '주요재무정보' 테이블(멀티레벨 헤더)을 파싱.
-    반환: {
-      'years':     ['2021/12', ..., '2026/12(E)', '2027/12(E)', '2028/12(E)'],
-      'hist_idx':  [0,1,2,3,4],   # 확정 연도 인덱스
-      'est_idx':   [5,6,7],       # 컨센서스 인덱스
-      'rows':      {'매출액': [v0,...,v7], 'EPS': [...], ...}
-    }
-    """
+def _fetch_naver_main(stock_code):
+    """main.naver 페이지를 한 번만 요청, (soup, resp_text) 반환."""
     url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
     resp = requests.get(url, headers=NAVER_HEADERS, timeout=20)
     if resp.status_code != 200:
+        return None, None
+    resp.encoding = 'utf-8'
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    return soup, resp.text
+
+def get_naver_finance(stock_code):
+    """
+    BeautifulSoup으로 '주요재무정보' 테이블을 직접 파싱.
+    thead에서 연도 추출, tbody에서 행별 값 추출.
+    반환: {
+      'years':     ['2023/12', '2024/12', '2025/12', '2026/12(E)'],
+      'hist_idx':  [0,1,2],
+      'est_idx':   [3],
+      'rows':      {'매출액': [...], 'EPS': [...], ...},
+      'soup':      BeautifulSoup 객체 (목표가 등 재사용용)
+    }
+    """
+    soup, _ = _fetch_naver_main(stock_code)
+    if soup is None:
         return None
 
-    # requests가 HTTP 헤더 charset을 자동 감지해 디코딩
-    resp.encoding = resp.apparent_encoding or 'utf-8'
-    tables = pd.read_html(io.StringIO(resp.text))
+    # tbody[2] = 주요재무정보 연간+분기 데이터
+    tbodies = soup.find_all('tbody')
+    if len(tbodies) < 3:
+        return None
+    fin_tbody = tbodies[2]
+    fin_table_tag = fin_tbody.find_parent('table')
+    if fin_table_tag is None:
+        return None
 
-    # 재무 테이블 찾기: '주요재무정보' 3레벨 튜플 헤더 테이블
-    # 컬럼 구조: ('주요재무정보','주요재무정보','주요재무정보'), ('최근 연간 실적','2023.12','IFRS연결'), ...
-    fin_table = None
-    for t in tables:
-        cols = list(t.columns)
-        # 멀티레벨 튜플이고 '주요재무정보' 포함
-        if not isinstance(cols[0], tuple):
-            continue
-        header_str = ' '.join(str(x) for x in cols[0])
-        if '주요재무정보' not in header_str:
-            continue
-        # 연도 컬럼 3개 이상 있으면 선택
-        year_count = sum(1 for c in cols if get_col_year(c) is not None)
-        if year_count >= 3:
-            fin_table = t
+    # ── thead에서 연간 연도 추출 ──────────────────────────────
+    # thead 구조:
+    #   tr[0]: 주요재무정보 | 최근 연간 실적 (colspan=4) | 최근 분기 실적 (colspan=6)
+    #   tr[1]: 2023.12 | 2024.12 | 2025.12 | 2026.12(E) | 2025.03 | ...
+    #   tr[2]: IFRS연결 | ...
+    thead = fin_table_tag.find('thead')
+    if thead is None:
+        return None
+
+    header_rows = thead.find_all('tr')
+    if len(header_rows) < 2:
+        return None
+
+    # tr[0]에서 '최근 연간 실적' colspan 계산
+    annual_col_count = 0
+    for th in header_rows[0].find_all(['th', 'td']):
+        txt = th.get_text(strip=True)
+        if '연간' in txt:
+            try:
+                annual_col_count = int(th.get('colspan', 1))
+            except:
+                annual_col_count = 4
             break
 
-    if fin_table is None:
-        return None
-
-    # 연도 레이블 및 컬럼 인덱스 추출 (연간 실적만, 분기 제외)
-    # 튜플 첫 번째 레벨에 '연간' 포함된 컬럼만 선택
+    # tr[1]에서 연도 추출 (첫 번째 th 건너뛰고, 연간 개수만큼)
+    year_ths = header_rows[1].find_all(['th', 'td'])
+    # 첫 번째 칸은 '주요재무정보' 헤더 (건너뜀)
+    # 실제 연도는 index 1부터
     year_labels = []
-    year_col_indices = []
-    for i, c in enumerate(fin_table.columns):
-        yr_str = get_col_year(c)
-        if yr_str is None:
-            continue
-        # 튜플이면 첫 번째 레벨에 '연간' 있어야 함 (분기 제외)
-        if isinstance(c, tuple) and '연간' not in str(c[0]):
-            continue
-        year_labels.append(norm_year(yr_str))
-        year_col_indices.append(i)
+    annual_col_indices = []  # tbody의 td 인덱스 (첫 번째 th 제외)
+    for i, th in enumerate(year_ths):
+        if annual_col_count and i >= annual_col_count:
+            break  # 분기 영역 시작
+        txt = th.get_text(strip=True)
+        if re.search(r'20\d\d', txt):
+            year_labels.append(norm_year(txt))
+            annual_col_indices.append(i)
 
     if not year_labels:
         return None
 
-    # 행 이름 매핑 (실제 네이버 row 이름 기준, 정확 일치 우선)
+    # ── 행 이름 매핑 ─────────────────────────────────────────
     ROW_ALIASES = {
         '매출액':         '매출액',
         '영업이익':       '영업이익',
@@ -135,9 +156,11 @@ def get_naver_finance(stock_code):
     }
 
     rows = {}
-    for _, row in fin_table.iterrows():
-        raw_name = str(row.iloc[0]).strip()
-        # 정확 일치 우선, 그 다음 포함 관계
+    for tr in fin_tbody.find_all('tr'):
+        th = tr.find('th')
+        raw_name = th.get_text(strip=True) if th else ''
+        if not raw_name:
+            continue
         mapped = ROW_ALIASES.get(raw_name)
         if mapped is None:
             for alias, key in ROW_ALIASES.items():
@@ -147,10 +170,14 @@ def get_naver_finance(stock_code):
         if mapped is None:
             mapped = raw_name
 
+        tds = tr.find_all('td')
         vals = []
-        for ci in year_col_indices:
-            cell = row.iloc[ci]
-            vals.append(str(cell).strip() if not pd.isna(cell) else '-')
+        for ci in annual_col_indices:
+            if ci < len(tds):
+                v = tds[ci].get_text(strip=True).replace(',', '')
+                vals.append(v if v else '-')
+            else:
+                vals.append('-')
         rows[mapped] = vals
 
     hist_idx = [i for i, y in enumerate(year_labels) if '(E)' not in y]
@@ -161,7 +188,79 @@ def get_naver_finance(stock_code):
         'hist_idx': hist_idx,
         'est_idx':  est_idx,
         'rows':     rows,
+        'soup':     soup,   # 목표가 등 재사용
     }
+
+# ── 2b. 증권사 목표가 ─────────────────────────────────────────
+def get_target_prices(stock_code, naver_soup=None):
+    """
+    증권사 목표가 수집.
+    - 컨센서스 평균: main.naver 투자의견 테이블
+    - 증권사별 목표가: navercomp.wisereport.co.kr tbody[6]
+      (제공처 | 최종일자 | 목표가 | 직전목표가 | 변동률 | 투자의견 | 직전투자의견)
+    반환: {
+      'consensus_tp': 380417,
+      'broker_list':  [{'broker':'미래에셋', 'tp':480000, 'date':'26/05/20', 'opinion':'매수'}, ...],
+      'tp_avg': 460000, 'tp_high': 570000, 'tp_low': 390000,
+    }
+    """
+    result = {}
+
+    # ① 컨센서스 평균 목표가 (main.naver 투자의견 테이블)
+    if naver_soup:
+        inv_table = naver_soup.find('table', summary='투자의견 정보')
+        if inv_table:
+            ems = inv_table.find_all('em')
+            if len(ems) >= 2:
+                tp_text = ems[1].get_text(strip=True).replace(',', '')
+                try:
+                    result['consensus_tp'] = int(tp_text)
+                except:
+                    pass
+
+    # ② 증권사별 목표가 리스트 (wisereport)
+    broker_list = []
+    try:
+        url = f'https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd={stock_code}'
+        resp = requests.get(url, headers={**NAVER_HEADERS, 'Referer': 'https://navercomp.wisereport.co.kr'}, timeout=15)
+        resp.encoding = 'utf-8'
+        soup_wr = BeautifulSoup(resp.text, 'html.parser')
+        tbodies = soup_wr.find_all('tbody')
+        # tbody[6] = '제공처별 투자의견 및 목표주가' 테이블
+        if len(tbodies) >= 7:
+            tb = tbodies[6]
+            for tr in tb.find_all('tr'):
+                tds = [td.get_text(strip=True) for td in tr.find_all('td')]
+                if len(tds) >= 3:
+                    broker  = tds[0]
+                    date    = tds[1]
+                    tp_str  = tds[2].replace(',', '')
+                    opinion = tds[5] if len(tds) > 5 else ''
+                    if broker and re.match(r'\d+', tp_str):
+                        try:
+                            broker_list.append({
+                                'broker':  broker,
+                                'tp':      int(tp_str),
+                                'date':    date,
+                                'opinion': opinion,
+                            })
+                        except:
+                            pass
+                    elif broker == '최근 3개월 이내에 제시된 의견이 없습니다.':
+                        break
+    except:
+        pass
+
+    if broker_list:
+        prices = [b['tp'] for b in broker_list]
+        result['broker_list'] = broker_list
+        result['tp_avg']  = int(sum(prices) / len(prices))
+        result['tp_high'] = max(prices)
+        result['tp_low']  = min(prices)
+    else:
+        result['broker_list'] = []
+
+    return result if (result.get('consensus_tp') or result.get('broker_list')) else None
 
 # ── 3. 유틸 ──────────────────────────────────────────────────
 def safe_float(val):
@@ -202,23 +301,34 @@ def get_risk_free_rate():
         pass
     return 0.044
 
-# ── 6. 베타 (네이버 PC 업종비교 테이블) ─────────────────────────
-def get_beta_naver(stock_code):
+# ── 6. 베타 (soup 재사용) ────────────────────────────────────
+def get_beta_from_soup(soup):
+    """get_naver_finance()의 soup을 재사용해 베타 추출."""
     try:
-        url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
-        resp = requests.get(url, headers=NAVER_HEADERS, timeout=15)
-        resp.encoding = resp.apparent_encoding or 'utf-8'
-        tables = pd.read_html(io.StringIO(resp.text))
-        for t in tables:
-            for col in t.columns:
-                for i, v in enumerate(t[col].astype(str)):
-                    if '베타' in v:
-                        for cell in t.iloc[i].astype(str):
-                            m = re.search(r'\d+\.\d+', cell)
-                            if m:
-                                b = float(m.group())
-                                if 0.1 < b < 5.0:
-                                    return b
+        if soup is None:
+            return 1.0
+        # 업종비교 테이블에서 '베타' 행 찾기
+        for table in soup.find_all('table'):
+            for tr in table.find_all('tr'):
+                th = tr.find('th')
+                if th and '베타' in th.get_text():
+                    tds = tr.find_all('td')
+                    for td in tds:
+                        m = re.search(r'\d+\.\d+', td.get_text())
+                        if m:
+                            b = float(m.group())
+                            if 0.1 < b < 5.0:
+                                return b
+        # tbody[3](업종비교)에서 텍스트 검색
+        tbodies = soup.find_all('tbody')
+        for tb in tbodies:
+            text = tb.get_text()
+            if '베타' in text:
+                m = re.search(r'베타[^\d]*(\d+\.\d+)', text)
+                if m:
+                    b = float(m.group(1))
+                    if 0.1 < b < 5.0:
+                        return b
     except:
         pass
     return 1.0
@@ -529,10 +639,15 @@ def analyze_stock(company_name):
         if naver_data is None:
             return {"error": f"네이버 증권에서 재무 데이터를 가져오지 못했습니다. (code={stock_code})"}
 
+        soup = naver_data.get('soup')  # main.naver soup 재사용
+
         current_price = get_current_price(stock_code)
         rf   = get_risk_free_rate()
-        beta = get_beta_naver(stock_code)
+        beta = get_beta_from_soup(soup)
         r_value = rf + beta * 0.05
+
+        # 증권사 목표가
+        tp_data = get_target_prices(stock_code, naver_soup=soup)
 
         return {
             "name":          company_name,
@@ -544,8 +659,9 @@ def analyze_stock(company_name):
                 "beta": f"{beta:.2f}",
                 "r":    f"{r_value*100:.2f}",
             },
-            "dcf":  calc_dcf(naver_data, r_value, current_price),
-            "band": calc_valuation_band(naver_data, current_price),
+            "dcf":   calc_dcf(naver_data, r_value, current_price),
+            "band":  calc_valuation_band(naver_data, current_price),
+            "tp":    tp_data,
         }
 
     except Exception as e:

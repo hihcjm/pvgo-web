@@ -87,6 +87,49 @@
             {{ result.raw_table | safe }}
         </div>
 
+        {# ── 증권사 목표가 ── #}
+        {% if result.tp %}
+        <div class="model-section">
+            <div class="model-header">증권사 목표가</div>
+            <div style="padding: 16px 24px 8px;">
+                {% if result.tp.consensus_tp %}
+                <p style="margin:0 0 10px 0; font-size:14px;">
+                    <strong>컨센서스 목표가</strong>:
+                    <span style="color:#003366; font-size:1.2em; font-weight:bold;">{{ "{:,}".format(result.tp.consensus_tp) }}원</span>
+                    {% if result.tp.tp_avg %}
+                    &nbsp;|&nbsp;
+                    <strong>증권사 평균</strong>: {{ "{:,}".format(result.tp.tp_avg) }}원
+                    &nbsp;(<span style="color:#28a745;">최고 {{ "{:,}".format(result.tp.tp_high) }}원</span>
+                    &nbsp;/&nbsp;<span style="color:#d9534f;">최저 {{ "{:,}".format(result.tp.tp_low) }}원</span>)
+                    {% endif %}
+                </p>
+                {% endif %}
+                {% if result.tp.broker_list %}
+                <div style="overflow-x:auto;">
+                <table class="val-table" style="font-size:12px;">
+                    <thead><tr>
+                        <th style="text-align:left;">증권사</th>
+                        <th>날짜</th>
+                        <th>목표주가</th>
+                        <th>투자의견</th>
+                    </tr></thead>
+                    <tbody>
+                    {% for b in result.tp.broker_list %}
+                    <tr>
+                        <td style="text-align:left;">{{ b.broker }}</td>
+                        <td style="text-align:center;">{{ b.date }}</td>
+                        <td>{{ "{:,}".format(b.tp) }}원</td>
+                        <td style="text-align:center;">{{ b.opinion }}</td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
         {# ── DCF 가치평가 ── #}
         <div class="model-section">
             <div class="model-header">DCF (현금흐름할인)</div>
