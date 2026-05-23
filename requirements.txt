@@ -1,7 +1,7 @@
-flask
-pandas
-requests
-finance-datareader
-lxml
-gunicorn
-beautifulsoup4
+flask>=2.3.0
+pandas>=2.0.0
+requests>=2.31.0
+finance-datareader>=0.9.50
+lxml>=4.9.0
+gunicorn>=21.2.0
+beautifulsoup4>=4.12.0

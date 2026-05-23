@@ -1,399 +1,709 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-    <meta charset="UTF-8">
-    <title>국내가치평가_made by hocheol</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-    <style>
-        body { font-family: 'Malgun Gothic', sans-serif; background-color: #f4f7f6; padding: 20px; }
-        .search-box { background: white; padding: 25px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.05); max-width: 600px; margin: 0 auto 30px auto; text-align: center; }
-        input, button { padding: 10px; font-size: 15px; margin: 5px; border-radius: 5px; border: 1px solid #ccc; }
-        input[type="text"] { width: 180px; }
-        button { background: #003366; color: white; cursor: pointer; font-weight: bold; }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>국내주식 밸류에이션 (made by hocheol){% if result and not result.error %} — {{ result.name }}{% endif %}</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Malgun Gothic', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f0f4f8;
+    color: #1a202c;
+    min-height: 100vh;
+  }
 
-        /* 크롤링 원본 테이블 */
-        .table-section { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); margin: 20px auto; max-width: 1100px; overflow-x: auto; }
-        .financial-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; text-align: right; }
-        .financial-table th, .financial-table td { padding: 10px; border: 1px solid #ddd; }
-        .financial-table th { background-color: #003366; color: white; text-align: center; }
-        .financial-table td:first-child { text-align: left; font-weight: bold; background: #f9f9f9; }
+  /* ── 헤더 ── */
+  .site-header {
+    background: linear-gradient(135deg, #1a365d 0%, #2b6cb0 100%);
+    color: #fff;
+    padding: 20px 32px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .site-header h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.3px; }
+  .site-header p  { font-size: 13px; opacity: 0.75; margin-top: 2px; }
 
-        /* DDM 결과 표 */
-        .model-section { max-width: 1100px; margin: 30px auto; background: white; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.08); overflow: hidden; }
-        .model-header { background: #003366; color: white; padding: 12px 20px; font-size: 1.1em; font-weight: bold; }
-        .val-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        .val-table th { background: #f0f4f8; color: #003366; font-weight: bold; padding: 10px 14px; border-bottom: 2px solid #003366; border-right: 1px solid #ddd; text-align: center; }
-        .val-table th:first-child { text-align: left; width: 130px; }
-        .val-table td { padding: 10px 14px; border-bottom: 1px solid #eee; border-right: 1px solid #eee; text-align: right; }
-        .val-table td:first-child { text-align: left; font-weight: bold; color: #555; background: #fafafa; }
-        .val-table tr:last-child td { border-bottom: none; }
-        .val-table td.pos { color: #28a745; font-weight: bold; }
-        .val-table td.neg { color: #d9534f; font-weight: bold; }
-        .val-table td.na  { color: #aaa; font-style: italic; }
-        .val-table td.g-flag { font-size: 11px; color: #888; }
-        .cons-col { background: #fffbf0; }
+  /* ── 검색 폼 ── */
+  .search-wrap {
+    background: #fff;
+    border-bottom: 1px solid #e2e8f0;
+    padding: 16px 32px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .search-wrap input {
+    width: 200px;
+    padding: 9px 14px;
+    border: 1px solid #cbd5e0;
+    border-radius: 6px;
+    font-size: 15px;
+    font-family: 'Malgun Gothic', sans-serif;
+    outline: none;
+    transition: border-color .2s;
+  }
+  .search-wrap input:focus { border-color: #3182ce; }
+  .search-wrap button {
+    padding: 9px 22px;
+    background: #3182ce;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .2s;
+  }
+  .search-wrap button:hover { background: #2b6cb0; }
+  .search-wrap .hint { font-size: 12px; color: #718096; }
 
-        /* 밴드 분석 */
-        .band-section { max-width: 1100px; margin: 30px auto; background: white; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.08); overflow: hidden; }
-        .band-metric-block { padding: 20px 24px 24px; border-bottom: 1px solid #eee; }
-        .band-metric-block:last-child { border-bottom: none; }
-        .band-metric-title { font-size: 1em; font-weight: bold; color: #003366; margin-bottom: 14px; }
-        .band-grid { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
-        .band-chart-wrap { flex: 1; min-width: 300px; }
-        .band-tables { flex: 1; min-width: 280px; }
-        .band-sub-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 12px; }
-        .band-sub-table th { background: #f0f4f8; color: #003366; font-weight: bold; padding: 7px 12px; border-bottom: 2px solid #003366; text-align: center; border-right: 1px solid #ddd; }
-        .band-sub-table th:first-child { text-align: left; }
-        .band-sub-table td { padding: 7px 12px; border-bottom: 1px solid #eee; border-right: 1px solid #eee; text-align: right; }
-        .band-sub-table td:first-child { text-align: left; color: #555; font-weight: bold; background: #fafafa; }
-        .grade-극저평가 { color: #1565c0; font-weight: bold; }
-        .grade-저평가   { color: #42a5f5; font-weight: bold; }
-        .grade-적정     { color: #388e3c; font-weight: bold; }
-        .grade-고평가   { color: #e65100; font-weight: bold; }
-        .grade-초고평가 { color: #b71c1c; font-weight: bold; }
-    </style>
+  /* ── 공통 카드 ── */
+  .card {
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 1px 4px rgba(0,0,0,.08);
+    margin: 16px 32px;
+    overflow: hidden;
+  }
+  .card-header {
+    background: #ebf4ff;
+    padding: 12px 20px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #2b6cb0;
+    border-bottom: 1px solid #bee3f8;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* ── 종목 헤더 ── */
+  .stock-hero {
+    background: #fff;
+    margin: 16px 32px 0;
+    border-radius: 10px;
+    box-shadow: 0 1px 4px rgba(0,0,0,.08);
+    padding: 20px 24px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 24px;
+    align-items: flex-start;
+  }
+  .stock-hero .name-block { flex: 1; }
+  .stock-hero .name-block h2 { font-size: 22px; font-weight: 800; }
+  .stock-hero .name-block .code-badge {
+    display: inline-block;
+    background: #ebf4ff; color: #2b6cb0;
+    font-size: 12px; font-weight: 700;
+    padding: 2px 8px; border-radius: 4px; margin-left: 8px;
+  }
+  .stock-hero .name-block .sub { font-size: 12px; color: #718096; margin-top: 6px; }
+  .stock-hero .price-block { text-align: right; }
+  .stock-hero .price-block .price { font-size: 28px; font-weight: 800; color: #1a365d; }
+  .stock-hero .price-block .price-sub { font-size: 12px; color: #718096; margin-top: 4px; }
+
+  /* ── KPI 그리드 ── */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 12px;
+    padding: 16px 20px;
+  }
+  .kpi-item { text-align: center; }
+  .kpi-item .kpi-label { font-size: 11px; color: #718096; font-weight: 600; text-transform: uppercase; }
+  .kpi-item .kpi-val   { font-size: 18px; font-weight: 700; color: #2d3748; margin-top: 2px; }
+
+  /* ── 증권사 목표가 ── */
+  .broker-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    padding: 0 20px 16px;
+  }
+  .broker-box {
+    background: #f7fafc;
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .broker-box h4 { font-size: 12px; color: #718096; font-weight: 700; text-transform: uppercase; margin-bottom: 8px; }
+  .tp-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .tp-row .label { font-size: 12px; color: #718096; }
+  .tp-row .value { font-size: 14px; font-weight: 700; }
+  .tp-row .value.up   { color: #38a169; }
+  .tp-row .value.down { color: #e53e3e; }
+  .broker-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  .broker-table th { background: #edf2f7; padding: 5px 8px; text-align: left; font-weight: 700; color: #4a5568; border-bottom: 1px solid #e2e8f0; }
+  .broker-table td { padding: 5px 8px; border-bottom: 1px solid #edf2f7; }
+  .broker-table tr:last-child td { border-bottom: none; }
+
+  /* ── 재무 테이블 ── */
+  .financial-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .financial-table th {
+    background: #edf2f7; padding: 8px 12px;
+    text-align: right; font-weight: 700; color: #4a5568;
+    border-bottom: 2px solid #e2e8f0; white-space: nowrap;
+  }
+  .financial-table th:first-child { text-align: left; }
+  .financial-table td {
+    padding: 6px 12px; border-bottom: 1px solid #edf2f7;
+    text-align: right; white-space: nowrap;
+  }
+  .financial-table td:first-child { text-align: left; color: #4a5568; font-weight: 500; }
+  .financial-table tr:hover td { background: #f7fafc; }
+  .financial-table tr:last-child td { border-bottom: none; }
+  .cons-col { background: #fffbeb !important; }
+
+  /* ── 밴드 (차트형) ── */
+  .band-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 20px;
+    padding: 20px;
+  }
+  .band-card {
+    background: #fff;
+    border-radius: 12px;
+    border: 1px solid #e2e8f0;
+    padding: 18px 20px 14px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  }
+  .band-card-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 14px;
+  }
+  .band-card-header h3 { font-size: 16px; font-weight: 800; color: #1a202c; }
+  .band-theory-block {
+    background: #f7fafc; border-radius: 8px;
+    padding: 10px 14px; margin-bottom: 14px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .band-theory-block .theory-label { font-size: 11px; color: #718096; }
+  .band-theory-block .theory-price { font-size: 20px; font-weight: 900; color: #1a365d; }
+  .band-theory-block .theory-diff  { font-size: 13px; font-weight: 700; }
+  .theory-up   { color: #38a169; }
+  .theory-down { color: #e53e3e; }
+  .band-bar-section { margin: 4px 0 12px; }
+  .band-bar-track {
+    position: relative; height: 10px; border-radius: 5px;
+    background: linear-gradient(to right,
+      #ebf8ff 0%, #bee3f8 20%, #90cdf4 40%,
+      #63b3ed 50%, #f6ad55 65%, #fc8181 80%, #fc5454 100%);
+    margin: 18px 0 6px;
+  }
+  .band-bar-tick {
+    position: absolute; top: -16px;
+    transform: translateX(-50%);
+    font-size: 10px; color: #718096; white-space: nowrap;
+  }
+  .band-bar-tick-line {
+    position: absolute; bottom: -4px;
+    transform: translateX(-50%);
+    width: 1px; height: 18px; background: #cbd5e0;
+  }
+  .band-bar-marker {
+    position: absolute; top: 50%;
+    transform: translate(-50%, -50%);
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; border: 3px solid #2d3748;
+    box-shadow: 0 1px 4px rgba(0,0,0,.25);
+    z-index: 2;
+  }
+  .band-bar-label-row {
+    display: flex; justify-content: space-between;
+    font-size: 10px; color: #a0aec0; margin-top: 4px;
+  }
+  .sigma-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+  .sigma-table td { padding: 3px 6px; }
+  .sigma-table td:last-child { text-align: right; font-weight: 600; }
+  .sigma-table tr.sigma-avg  td { background: #ebf4ff; color: #2b6cb0; font-weight: 700; border-radius: 4px; }
+  .sigma-table tr.sigma-curr td { background: #fffbeb; color: #b7791f; }
+  .grade-chip {
+    display: inline-block; padding: 3px 10px; border-radius: 10px;
+    font-size: 11px; font-weight: 700;
+  }
+  .grade-Undervalued, .grade-Significantly-Undervalued { background:#c6f6d5; color:#276749; }
+  .grade-Fair        { background:#fefcbf; color:#744210; }
+  .grade-Overvalued, .grade-Significantly-Overvalued  { background:#fed7d7; color:#9b2335; }
+
+  @media (max-width:700px) { .band-grid { grid-template-columns: 1fr; } }
+
+  /* ── Rolling DCF ── */
+  .rdcf-target-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    padding: 16px 20px;
+  }
+  .rdcf-target-card {
+    background: #f7fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 16px;
+    text-align: center;
+  }
+  .rdcf-target-card .yr-label {
+    font-size: 12px; font-weight: 700; color: #718096;
+    text-transform: uppercase; letter-spacing: .5px;
+  }
+  .rdcf-target-card .tp {
+    font-size: 26px; font-weight: 900; color: #1a365d;
+    margin: 6px 0 4px;
+  }
+  .rdcf-target-card .upside-up   { color: #38a169; font-size: 14px; font-weight: 700; }
+  .rdcf-target-card .upside-down { color: #e53e3e; font-size: 14px; font-weight: 700; }
+  .rdcf-target-card .sub-rows    { font-size: 11px; color: #718096; margin-top: 8px; line-height: 1.8; }
+  .rdcf-target-card .sub-rows span { display: block; }
+  .rdcf-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 11px; font-weight: 700; margin-bottom: 6px;
+  }
+  .rdcf-mature       { background:#ebf4ff; color:#2b6cb0; }
+  .rdcf-high_growth  { background:#fed7d7; color:#9b2335; }
+  .rdcf-cyclical     { background:#fefcbf; color:#744210; }
+
+  .rdcf-schedule-table { width:100%; border-collapse:collapse; font-size:12px; }
+  .rdcf-schedule-table th {
+    background:#edf2f7; padding:6px 10px;
+    text-align:right; font-weight:700; color:#4a5568;
+    border-bottom:2px solid #e2e8f0; white-space:nowrap;
+  }
+  .rdcf-schedule-table th:first-child { text-align:left; }
+  .rdcf-schedule-table td {
+    padding:5px 10px; border-bottom:1px solid #edf2f7;
+    text-align:right; white-space:nowrap;
+  }
+  .rdcf-schedule-table td:first-child { text-align:left; font-weight:600; }
+  .rdcf-schedule-table tr.consensus-row td { background:#fffbeb; }
+  .rdcf-schedule-table tr.ext-row td      { background:#f7fafc; color:#718096; }
+  .rdcf-schedule-table tr:last-child td   { border-bottom:none; }
+
+  @media (max-width:700px) { .rdcf-target-grid { grid-template-columns: 1fr; } }
+
+  /* ── 에러 ── */
+  .error-box {
+    background: #fff5f5; border: 1px solid #feb2b2; color: #c53030;
+    border-radius: 8px; padding: 16px 20px; margin: 20px 32px;
+    font-size: 14px; white-space: pre-wrap;
+  }
+
+  /* ── 반응형 ── */
+  @media (max-width: 700px) {
+    .card, .stock-hero, .error-box { margin: 12px 12px; }
+    .search-wrap { padding: 12px 16px; }
+    .broker-grid { grid-template-columns: 1fr; }
+    .kpi-grid { grid-template-columns: repeat(3, 1fr); }
+    .site-header { padding: 16px; }
+  }
+</style>
 </head>
 <body>
 
-<h2 style="text-align: center; color: #003366;">국내가치평가_made by hocheol</h2>
+<header class="site-header">
+  <div>
+    <h1>🇰🇷 국내주식 밸류에이션</h1>
+    <p>DCF · 상대가치 · 증권사 목표가 · 네이버 증권 &nbsp;|&nbsp; made by hocheol</p>
+  </div>
+</header>
 
-<div class="search-box">
-    <form method="POST">
-        <input type="text" name="company_name" placeholder="기업명 (예: 삼성전자)" value="{{ company_name }}" required>
-        <button type="submit">데이터 검증 및 평가</button>
-    </form>
+<div class="search-wrap">
+  <form method="POST" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+    <input type="text" name="company_name" value="{{ company_name }}"
+           placeholder="기업명 (예: 삼성전자)" autocomplete="off" autofocus>
+    <button type="submit">분석</button>
+    <span class="hint">국내 기업명을 입력하세요</span>
+  </form>
 </div>
 
 {% if result %}
-    {% if result.error %}
-        <p style="color: red; text-align: center; font-weight: bold;">{{ result.error }}</p>
-    {% else %}
+  {% if result.error %}
+  <div class="error-box">⚠️ {{ result.error }}</div>
+  {% else %}
 
-        <div style="text-align:center; margin-bottom: 12px;">
-          <span style="background:#003366; color:white; padding:8px 20px;
-                       border-radius:20px; font-size:1.1em; font-weight:bold;">
-            현재 주가: {{ result.current_price }} 원
+  {# ── 종목 헤더 ── #}
+  <div class="stock-hero">
+    <div class="name-block">
+      <h2>{{ result.name }}<span class="code-badge">{{ result.code }}</span></h2>
+      <div class="sub">
+        요구수익률 {{ result.r_info.r }}%
+        = rf {{ result.r_info.rf }}% (미국채10년) + β{{ result.r_info.beta }} × ERP 5.0%
+        {% if result.market_cap %}
+        &nbsp;|&nbsp; 시가총액 {{ result.market_cap }}조원
+        {% endif %}
+      </div>
+    </div>
+    <div class="price-block">
+      <div class="price">{{ result.current_price }}원</div>
+      <div class="price-sub">현재 주가</div>
+    </div>
+  </div>
+
+  {# ── KPI ── #}
+  <div class="card">
+    <div class="card-header">📊 주요 지표</div>
+    <div class="kpi-grid">
+      {% if result.kpi.per %}
+      <div class="kpi-item">
+        <div class="kpi-label">PER</div>
+        <div class="kpi-val">{{ result.kpi.per }}x</div>
+      </div>
+      {% endif %}
+      {% if result.kpi.pbr %}
+      <div class="kpi-item">
+        <div class="kpi-label">PBR</div>
+        <div class="kpi-val">{{ result.kpi.pbr }}x</div>
+      </div>
+      {% endif %}
+      {% if result.kpi.roe %}
+      <div class="kpi-item">
+        <div class="kpi-label">ROE</div>
+        <div class="kpi-val">{{ result.kpi.roe }}%</div>
+      </div>
+      {% endif %}
+      {% if result.kpi.div_yield %}
+      <div class="kpi-item">
+        <div class="kpi-label">배당수익률</div>
+        <div class="kpi-val">{{ result.kpi.div_yield }}%</div>
+      </div>
+      {% endif %}
+      {% if result.kpi.debt_ratio %}
+      <div class="kpi-item">
+        <div class="kpi-label">부채비율</div>
+        <div class="kpi-val">{{ result.kpi.debt_ratio }}%</div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  {# ── 증권사 목표가 ── #}
+  {% if result.tp %}
+  {% set tp = result.tp %}
+  <div class="card">
+    <div class="card-header">🎯 증권사 목표가</div>
+    <div class="broker-grid">
+
+      <div class="broker-box">
+        <h4>컨센서스 목표주가</h4>
+        {% if tp.consensus_tp %}
+        <div class="tp-row">
+          <span class="label">컨센서스</span>
+          <span class="value {% if result.current_price_raw and tp.consensus_tp > result.current_price_raw %}up{% else %}down{% endif %}">
+            {{ "{:,}".format(tp.consensus_tp) }}원
           </span>
         </div>
+        {% if result.current_price_raw and tp.consensus_tp %}
+        {% set upside = ((tp.consensus_tp - result.current_price_raw) / result.current_price_raw * 100) | round(1) %}
+        <div class="tp-row" style="margin-top:6px;border-top:1px solid #e2e8f0;padding-top:6px;">
+          <span class="label">상승여력</span>
+          <span class="value {% if upside > 0 %}up{% else %}down{% endif %}">{{ upside }}%</span>
+        </div>
+        {% endif %}
+        {% endif %}
+        {% if tp.tp_avg %}
+        <div class="tp-row" style="margin-top:8px;">
+          <span class="label">증권사 평균</span>
+          <span class="value">{{ "{:,}".format(tp.tp_avg) }}원</span>
+        </div>
+        <div class="tp-row">
+          <span class="label">최고</span>
+          <span class="value up">{{ "{:,}".format(tp.tp_high) }}원</span>
+        </div>
+        <div class="tp-row">
+          <span class="label">최저</span>
+          <span class="value down">{{ "{:,}".format(tp.tp_low) }}원</span>
+        </div>
+        {% endif %}
+      </div>
 
-        <div style="text-align:center; margin: 6px 0 20px 0; font-size: 13px; color: #555;">
-          요구수익률(r) = {{ result.r_info.rf }}% (미국채10년) + {{ result.r_info.beta }} × 5.0% (ERP)
-          = <strong>{{ result.r_info.r }}%</strong>
+      {% if tp.broker_list %}
+      <div class="broker-box" style="overflow-y:auto;max-height:220px;">
+        <h4>증권사별 목표주가</h4>
+        <table class="broker-table">
+          <thead>
+            <tr><th>증권사</th><th>목표가</th><th>의견</th><th>일자</th></tr>
+          </thead>
+          <tbody>
+          {% for b in tp.broker_list[:10] %}
+          <tr>
+            <td>{{ b.broker }}</td>
+            <td style="text-align:right;font-weight:600;">{{ "{:,}".format(b.tp) }}</td>
+            <td style="color:#38a169;">{{ b.opinion }}</td>
+            <td style="color:#a0aec0;">{{ b.date }}</td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+
+    </div>
+  </div>
+  {% endif %}
+
+  {# ── 재무제표 히스토리 ── #}
+  <div class="card">
+    <div class="card-header">📋 연간 재무제표 (네이버 증권)</div>
+    <div style="padding:12px 20px; overflow-x:auto;">
+      {{ result.raw_table | safe }}
+    </div>
+    <p style="padding:6px 20px 12px; color:#a0aec0; font-size:11px;">
+      단위: 매출·이익은 억원 · EPS·BPS·DPS는 원/주 · 비율은 % &nbsp;|&nbsp; ★ 컨센서스 추정치
+    </p>
+  </div>
+
+  {# ── 밸류에이션 밴드 (차트형) ── #}
+  {% if result.band %}
+  {% set grade_ko = {
+    'Significantly Undervalued': '매우 저평가',
+    'Undervalued': '저평가',
+    'Fair': '적정',
+    'Overvalued': '고평가',
+    'Significantly Overvalued': '매우 고평가'
+  } %}
+  <div class="card">
+    <div class="card-header">📈 상대가치 밴드 &nbsp;<span style="font-size:11px;font-weight:400;color:#718096;">과거 평균 배수 기준 예상주가 · 현재 주가 위치</span></div>
+    <div class="band-grid">
+    {% for b in result.band %}
+
+      {% if b.error %}
+      <div class="band-card" style="opacity:.5;">
+        <div class="band-card-header"><h3>{{ b.metric }}</h3></div>
+        <p style="font-size:12px;color:#a0aec0;">{{ b.error }}</p>
+      </div>
+
+      {% else %}
+      {% set m2s  = b.bands.m2s %}
+      {% set p2s  = b.bands.p2s %}
+      {% set rng  = p2s - m2s if p2s > m2s else 1 %}
+
+      {% if b.fwd_val %}
+        {% set cur_pct = ((b.fwd_val - m2s) / rng * 100) | round(1) %}
+        {% set cur_pct = [0, [cur_pct, 100] | min] | max %}
+      {% else %}
+        {% set cur_pct = 50 %}
+      {% endif %}
+
+      {% set pct_m1s = ((b.bands.m1s - m2s) / rng * 100) | round(1) %}
+      {% set pct_avg = ((b.bands.avg  - m2s) / rng * 100) | round(1) %}
+      {% set pct_p1s = ((b.bands.p1s  - m2s) / rng * 100) | round(1) %}
+
+      <div class="band-card">
+        <div class="band-card-header">
+          <h3>{{ b.metric }}</h3>
+          {% if b.grade_fwd %}
+          <span class="grade-chip grade-{{ b.grade_fwd | replace(' ', '-') }}">
+            {{ grade_ko[b.grade_fwd] if b.grade_fwd in grade_ko else b.grade_fwd }}
+          </span>
+          {% endif %}
         </div>
 
-        <div class="table-section">
-            <h3 style="color: #003366; margin-top: 0;">에프앤가이드에서 수집된 실제 재무제표 원본 표</h3>
-            <p style="font-size: 12px; color: #666;">* 프로그램이 이 표에서 단어를 검색하여 실시간 가치평가 공식에 대입합니다.</p>
-            {{ result.raw_table | safe }}
-        </div>
-
-        {# ── 증권사 목표가 ── #}
-        {% if result.tp %}
-        <div class="model-section">
-            <div class="model-header">증권사 목표가</div>
-            <div style="padding: 16px 24px 8px;">
-                {% if result.tp.consensus_tp %}
-                <p style="margin:0 0 10px 0; font-size:14px;">
-                    <strong>컨센서스 목표가</strong>:
-                    <span style="color:#003366; font-size:1.2em; font-weight:bold;">{{ "{:,}".format(result.tp.consensus_tp) }}원</span>
-                    {% if result.tp.tp_avg %}
-                    &nbsp;|&nbsp;
-                    <strong>증권사 평균</strong>: {{ "{:,}".format(result.tp.tp_avg) }}원
-                    &nbsp;(<span style="color:#28a745;">최고 {{ "{:,}".format(result.tp.tp_high) }}원</span>
-                    &nbsp;/&nbsp;<span style="color:#d9534f;">최저 {{ "{:,}".format(result.tp.tp_low) }}원</span>)
-                    {% endif %}
-                </p>
-                {% endif %}
-                {% if result.tp.broker_list %}
-                <div style="overflow-x:auto;">
-                <table class="val-table" style="font-size:12px;">
-                    <thead><tr>
-                        <th style="text-align:left;">증권사</th>
-                        <th>날짜</th>
-                        <th>목표주가</th>
-                        <th>투자의견</th>
-                    </tr></thead>
-                    <tbody>
-                    {% for b in result.tp.broker_list %}
-                    <tr>
-                        <td style="text-align:left;">{{ b.broker }}</td>
-                        <td style="text-align:center;">{{ b.date }}</td>
-                        <td>{{ "{:,}".format(b.tp) }}원</td>
-                        <td style="text-align:center;">{{ b.opinion }}</td>
-                    </tr>
-                    {% endfor %}
-                    </tbody>
-                </table>
-                </div>
-                {% endif %}
+        {% if b.theory_fwd %}
+        <div class="band-theory-block">
+          <div>
+            <div class="theory-label">평균 {{ b.metric }} 기준 예상주가</div>
+            <div class="theory-price">{{ b.theory_fwd }}원</div>
+            {% if b.base_label %}<div style="font-size:11px;color:#718096;margin-top:2px;">기준: {{ b.base_label }}</div>{% endif %}
+          </div>
+          <div style="text-align:right;">
+            <div class="theory-label" style="margin-bottom:4px;">현재가 대비 괴리율</div>
+            {% if b.diff_pct_fwd %}
+            <div class="theory-diff {% if b.diff_pct_fwd[0] == '+' %}theory-up{% else %}theory-down{% endif %}">
+              {% if b.diff_pct_fwd[0] == '+' %}▲{% else %}▼{% endif %}
+              {{ b.diff_pct_fwd }}%
             </div>
+            <div style="font-size:11px;color:#718096;margin-top:2px;">{{ b.diff_fwd }}원</div>
+            {% endif %}
+          </div>
         </div>
         {% endif %}
 
-        {# ── DCF 가치평가 ── #}
-        <div class="model-section">
-            <div class="model-header">DCF (현금흐름할인)</div>
-            {% if result.dcf.error %}
-                <p style="padding:16px;color:red;">{{ result.dcf.error }}</p>
-            {% else %}
-
-            {# 과거 FCF 참고값 #}
-            {% if result.dcf.hist_fcf %}
-            <div style="padding:12px 24px 4px; font-size:12px; color:#555;">
-                <strong>과거 FCF 실적</strong> (영업활동현금흐름 − CAPEX, 마진 평균 산출 기준)
-                &nbsp;|&nbsp; 발행주식수: <strong>{{ result.dcf.shares }}백만주</strong>
-                <table style="margin-top:6px; border-collapse:collapse; font-size:12px;">
-                    <thead><tr style="background:#f0f4f8;">
-                        <th style="padding:4px 12px; border:1px solid #ddd;">연도</th>
-                        <th style="padding:4px 12px; border:1px solid #ddd; text-align:right;">영업활동CF</th>
-                        <th style="padding:4px 12px; border:1px solid #ddd; text-align:right;">CAPEX</th>
-                        <th style="padding:4px 12px; border:1px solid #ddd; text-align:right;">FCF (억원)</th>
-                        <th style="padding:4px 12px; border:1px solid #ddd; text-align:right;">FCF/매출 마진</th>
-                        <th style="padding:4px 12px; border:1px solid #ddd; text-align:center;">출처</th>
-                    </tr></thead>
-                    <tbody>
-                    {% for h in result.dcf.hist_fcf %}
-                    <tr style="{% if h.excluded %}opacity:0.45;{% endif %}">
-                        <td style="padding:3px 12px; border:1px solid #eee;">
-                            {{ h.year }}{% if h.excluded %} <span style="color:#c00;font-size:10px;">제외</span>{% endif %}
-                        </td>
-                        {% if h.op_cf is defined %}
-                        <td style="padding:3px 12px; border:1px solid #eee; text-align:right;">{{ "{:,}".format(h.op_cf) }}</td>
-                        <td style="padding:3px 12px; border:1px solid #eee; text-align:right;">{{ "{:,}".format(h.capex) }}</td>
-                        {% else %}
-                        <td style="padding:3px 12px; border:1px solid #eee; text-align:center; color:#aaa;">-</td>
-                        <td style="padding:3px 12px; border:1px solid #eee; text-align:center; color:#aaa;">-</td>
-                        {% endif %}
-                        <td style="padding:3px 12px; border:1px solid #eee; text-align:right; {% if h.fcf < 0 %}color:#c00;{% endif %}">{{ "{:,}".format(h.fcf) }}</td>
-                        <td style="padding:3px 12px; border:1px solid #eee; text-align:right; {% if h.margin < 0 %}color:#c00;{% endif %}">{{ h.margin }}%</td>
-                        <td style="padding:3px 12px; border:1px solid #eee; text-align:center; color:#888;">{{ h.src }}</td>
-                    </tr>
-                    {% endfor %}
-                    </tbody>
-                </table>
-            </div>
+        <div class="band-bar-section">
+          <div class="band-bar-track">
+            <span class="band-bar-tick" style="left:0%;">-2σ</span>
+            <span class="band-bar-tick-line" style="left:0%;"></span>
+            <span class="band-bar-tick" style="left:{{ pct_m1s }}%;">-1σ</span>
+            <span class="band-bar-tick-line" style="left:{{ pct_m1s }}%;"></span>
+            <span class="band-bar-tick" style="left:{{ pct_avg }}%;font-weight:700;color:#2b6cb0;">μ</span>
+            <span class="band-bar-tick-line" style="left:{{ pct_avg }}%;background:#2b6cb0;"></span>
+            <span class="band-bar-tick" style="left:{{ pct_p1s }}%;">+1σ</span>
+            <span class="band-bar-tick-line" style="left:{{ pct_p1s }}%;"></span>
+            <span class="band-bar-tick" style="left:100%;">+2σ</span>
+            <span class="band-bar-tick-line" style="left:100%;"></span>
+            {% if b.fwd_val %}
+            <div class="band-bar-marker" style="left:{{ cur_pct }}%;"
+                 title="현재 {{ b.metric }}: {{ b.fwd_val }}"></div>
             {% endif %}
-
-            <table class="val-table">
-                <thead>
-                    <tr>
-                        <th></th>
-                        {% for row in result.dcf.pv_fcfs %}<th class="cons-col">{{ row.year }}</th>{% endfor %}
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>추정 FCFF (억원)</td>
-                        {% for row in result.dcf.pv_fcfs %}<td class="cons-col">{{ "{:,.0f}".format(row.fcf) }}</td>{% endfor %}
-                    </tr>
-                    <tr>
-                        <td>FCF 현재가치 (억원)</td>
-                        {% for row in result.dcf.pv_fcfs %}<td class="cons-col">{{ "{:,.0f}".format(row.pv) }}</td>{% endfor %}
-                    </tr>
-                    <tr>
-                        <td>터미널 밸류 PV (억원)</td>
-                        {% for row in result.dcf.pv_fcfs %}<td class="cons-col">{{ "{:,.0f}".format(row.pv_tv) }}</td>{% endfor %}
-                    </tr>
-                    <tr>
-                        <td>DCF 적정주가</td>
-                        {% for row in result.dcf.pv_fcfs %}
-                        <td class="cons-col">{{ row.fair_value }} 원</td>
-                        {% endfor %}
-                    </tr>
-                    <tr>
-                        <td>괴리 (금액)</td>
-                        {% for row in result.dcf.pv_fcfs %}
-                        <td class="cons-col">
-                            {% if row.diff %}<span class="{{ 'pos' if row.diff[0]=='+' else 'neg' }}">{{ row.diff }} 원</span>{% else %}-{% endif %}
-                        </td>
-                        {% endfor %}
-                    </tr>
-                    <tr>
-                        <td>괴리 (%)</td>
-                        {% for row in result.dcf.pv_fcfs %}
-                        <td class="cons-col">
-                            {% if row.diff_pct %}<span class="{{ 'pos' if row.diff_pct[0]=='+' else 'neg' }}">{{ row.diff_pct }}%</span>{% else %}-{% endif %}
-                        </td>
-                        {% endfor %}
-                    </tr>
-                </tbody>
-            </table>
-            <p style="padding:6px 20px 12px;color:#888;font-size:12px;">
-                평균 FCF 마진 {{ result.dcf.avg_fcff_margin }}% · 매출 성장률(CAGR) {{ result.dcf.rev_growth }}% · 할인율 {{ result.dcf.r }}% · 터미널 성장률 {{ result.dcf.g_terminal }}%
-                &nbsp;|&nbsp; 과거 FCF: FnGuide 현금흐름표 (영업활동CF − CAPEX)
-                &nbsp;|&nbsp; <strong>*</strong> 과거 마진·성장률 기반 추정 연도
-            </p>
-            {% endif %}
+          </div>
+          <div class="band-bar-label-row">
+            <span>{{ m2s }}</span>
+            <span style="color:#2b6cb0;font-weight:600;">{{ b.bands.avg }}</span>
+            <span>{{ p2s }}</span>
+          </div>
         </div>
 
-        {# ── PER / PBR / PEG / EV·Sales 밴드 분석 ── #}
-        <div class="band-section">
-            <div class="model-header">밸류에이션 밴드 분석 (기준: 21~25년 평균)</div>
-            {% for item in result.band %}
-            <div class="band-metric-block">
-                <div class="band-metric-title">{{ item.metric }} 밴드</div>
-                {% if item.error %}
-                    <p style="color:red;">{{ item.error }}</p>
-                {% else %}
-                <div class="band-grid">
+        <table class="sigma-table">
+          <tr><td style="color:#a0aec0;">-2σ</td><td>{{ b.bands.m2s }}</td>
+              <td style="color:#a0aec0;">+1σ</td><td>{{ b.bands.p1s }}</td></tr>
+          <tr><td style="color:#718096;">-1σ</td><td>{{ b.bands.m1s }}</td>
+              <td style="color:#718096;">+2σ</td><td>{{ b.bands.p2s }}</td></tr>
+          <tr class="sigma-avg">
+            <td>평균(μ)</td><td>{{ b.hist_avg }}</td>
+            <td>표준편차</td><td>± {{ b.hist_std }}</td>
+          </tr>
+          {% if b.fwd_val %}
+          <tr class="sigma-curr">
+            <td>현재 {{ b.metric }}</td><td>{{ b.fwd_val }}</td>
+            <td>과거 데이터</td><td>{{ b.hist_vals | length }}개년</td>
+          </tr>
+          {% endif %}
+        </table>
 
-                    {# 왼쪽: 차트 #}
-                    <div class="band-chart-wrap">
-                        <canvas id="chart_{{ item.metric | replace('/', '_') }}" height="90"></canvas>
-                    </div>
+      </div>
+      {% endif %}
+    {% endfor %}
+    </div>
+    <p style="padding:4px 20px 14px;color:#a0aec0;font-size:11px;">
+      예상주가 = 과거 평균 배수 × 추정 지표 (EPS·BPS·SPS). 적자·음수 연도 제외. ● 마커 = 현재 배수 위치.
+    </p>
+  </div>
+  {% endif %}
 
-                    {# 오른쪽: 요약표 + 역산주가표 #}
-                    <div class="band-tables">
-                        <table class="band-sub-table">
-                            <thead><tr><th>구분</th><th>배수</th><th>등급</th></tr></thead>
-                            <tbody>
-                                <tr>
-                                    <td>과거평균 (21~25년)</td>
-                                    <td>{{ item.hist_avg }}x</td>
-                                    <td>—</td>
-                                </tr>
-                                <tr>
-                                    <td>표준편차 (σ)</td>
-                                    <td>{{ item.hist_std }}</td>
-                                    <td>—</td>
-                                </tr>
-                                <tr>
-                                    <td>25년도</td>
-                                    <td>{% if item.val_25 %}{{ item.val_25 }}x{% else %}-{% endif %}</td>
-                                    <td>{% if item.grade_25 %}<span class="grade-{{ item.grade_25 }}">{{ item.grade_25 }}</span>{% else %}-{% endif %}</td>
-                                </tr>
-                                <tr style="background:#fffbf0;">
-                                    <td>26E</td>
-                                    <td>{% if item.val_26e %}{{ item.val_26e }}x{% else %}-{% endif %}</td>
-                                    <td>{% if item.grade_26e %}<span class="grade-{{ item.grade_26e }}">{{ item.grade_26e }}</span>{% else %}-{% endif %}</td>
-                                </tr>
-                            </tbody>
-                        </table>
+  {# ── Rolling DCF (Damodaran v3) ── #}
+  {% if result.rdcf and not result.rdcf.error %}
+  {% set rd = result.rdcf %}
+  {% set ft_label = {'mature':'성숙기','hyper_growth':'고성장·적자','cyclical':'경기순환'}[rd.firm_type] | default(rd.firm_type) %}
+  {% set ft_class = {'mature':'rdcf-mature','hyper_growth':'rdcf-high_growth','cyclical':'rdcf-cyclical'}[rd.firm_type] | default('rdcf-mature') %}
+  <div class="card">
+    <div class="card-header">🎯 롤링 DCF 적정주가 (Damodaran 방법론)
+      <span style="font-size:11px;font-weight:400;color:#718096;margin-left:8px;">
+        FCF = NOPAT − 재투자 (Sales-to-Capital) · 단위: 조원
+      </span>
+    </div>
 
-                        <table class="band-sub-table">
-                            <thead><tr><th>구분</th><th>역산 적정주가</th><th>괴리금액</th><th>괴리(%)</th></tr></thead>
-                            <tbody>
-                                <tr>
-                                    <td>25년도</td>
-                                    <td>{% if item.theory_25 %}{{ item.theory_25 }} 원{% else %}-{% endif %}</td>
-                                    <td>{% if item.diff_25 %}<span class="{{ 'pos' if item.diff_25[0]=='+' else 'neg' }}">{{ item.diff_25 }} 원</span>{% else %}-{% endif %}</td>
-                                    <td>{% if item.diff_pct_25 %}<span class="{{ 'pos' if item.diff_pct_25[0]=='+' else 'neg' }}">{{ item.diff_pct_25 }}%</span>{% else %}-{% endif %}</td>
-                                </tr>
-                                <tr style="background:#fffbf0;">
-                                    <td>26E</td>
-                                    <td>{% if item.theory_26e %}{{ item.theory_26e }} 원{% else %}-{% endif %}</td>
-                                    <td>{% if item.diff_26e %}<span class="{{ 'pos' if item.diff_26e[0]=='+' else 'neg' }}">{{ item.diff_26e }} 원</span>{% else %}-{% endif %}</td>
-                                    <td>{% if item.diff_pct_26e %}<span class="{{ 'pos' if item.diff_pct_26e[0]=='+' else 'neg' }}">{{ item.diff_pct_26e }}%</span>{% else %}-{% endif %}</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
+    <div style="padding:12px 20px 0; display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+      <span class="rdcf-badge {{ ft_class }}">
+        {{ ft_label }} &nbsp;·&nbsp; {{ rd.horizon }}년 호라이즌
+      </span>
+      {% if rd.survival_prob < 1.0 %}
+      <span class="rdcf-badge" style="background:#fed7d7;color:#9b2335;">
+        생존확률 {{ (rd.survival_prob * 100)|int }}%
+      </span>
+      {% endif %}
+      <span style="font-size:12px;color:#718096;">
+        WACC <strong>{{ rd.wacc }}%</strong>
+        (rf {{ rd.rf }}% + β{{ rd.beta }} × ERP 5.0%)
+        &nbsp;·&nbsp; 영구성장률 <strong>{{ rd.terminal_g }}%</strong>
+        &nbsp;·&nbsp; EBIT 마진 수렴 <strong>{{ rd.industry_margin }}%</strong>
+        &nbsp;·&nbsp; 법인세 <strong>{{ rd.tax_rate }}%</strong>
+      </span>
+    </div>
 
-                <script>
-                (function() {
-                    var b = {{ item.bands | tojson }};
-                    var val25  = {{ item.val_25  | tojson }};
-                    var val26e = {{ item.val_26e | tojson }};
-                    var ctx = document.getElementById('chart_{{ item.metric | replace("/", "_") }}').getContext('2d');
-
-                    // 표시 범위
-                    var xMin = b.m3s, xMax = b.p3s;
-                    var range = xMax - xMin || 1;
-
-                    // 밴드 구간을 색칠하는 커스텀 플러그인
-                    var bandPlugin = {
-                        id: 'bandBg',
-                        beforeDraw: function(chart) {
-                            var ctx = chart.ctx;
-                            var xScale = chart.scales.x;
-                            var yScale = chart.scales.y;
-                            var top = yScale.top, bottom = yScale.bottom;
-
-                            var zones = [
-                                { from: b.m3s, to: b.m2s, color: 'rgba(21,101,192,0.15)' },
-                                { from: b.m2s, to: b.m1s, color: 'rgba(66,165,245,0.15)' },
-                                { from: b.m1s, to: b.p1s, color: 'rgba(56,142,60,0.12)'  },
-                                { from: b.p1s, to: b.p2s, color: 'rgba(230,81,0,0.15)'   },
-                                { from: b.p2s, to: b.p3s, color: 'rgba(183,28,28,0.15)'  },
-                            ];
-                            zones.forEach(function(z) {
-                                var x1 = xScale.getPixelForValue(z.from);
-                                var x2 = xScale.getPixelForValue(z.to);
-                                ctx.fillStyle = z.color;
-                                ctx.fillRect(x1, top, x2 - x1, bottom - top);
-                            });
-
-                            // 구분선
-                            [b.m2s, b.m1s, b.avg, b.p1s, b.p2s].forEach(function(v) {
-                                var x = xScale.getPixelForValue(v);
-                                ctx.strokeStyle = 'rgba(0,0,0,0.2)';
-                                ctx.lineWidth = 1;
-                                ctx.setLineDash([4,3]);
-                                ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
-                                ctx.setLineDash([]);
-                            });
-                        }
-                    };
-
-                    // 마커용 scatter 데이터
-                    var scatterData = [];
-                    if (val25  !== null) scatterData.push({ x: val25,  y: 0, label: '25년' });
-                    if (val26e !== null) scatterData.push({ x: val26e, y: 0, label: '26E'  });
-
-                    new Chart(ctx, {
-                        type: 'scatter',
-                        data: {
-                            datasets: [{
-                                label: '25년',
-                                data: val25  !== null ? [{ x: val25,  y: 0 }] : [],
-                                pointStyle: 'circle',
-                                pointRadius: 10,
-                                pointHoverRadius: 12,
-                                backgroundColor: '#1565c0',
-                            }, {
-                                label: '26E',
-                                data: val26e !== null ? [{ x: val26e, y: 0 }] : [],
-                                pointStyle: 'triangle',
-                                pointRadius: 10,
-                                pointHoverRadius: 12,
-                                backgroundColor: '#e65100',
-                            }]
-                        },
-                        options: {
-                            responsive: true,
-                            plugins: {
-                                legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } },
-                                tooltip: {
-                                    callbacks: {
-                                        label: function(ctx) {
-                                            return ctx.dataset.label + ': ' + ctx.parsed.x + 'x';
-                                        }
-                                    }
-                                }
-                            },
-                            scales: {
-                                x: {
-                                    min: xMin, max: xMax,
-                                    title: { display: true, text: '{{ item.metric }} (배)', font: { size: 11 } },
-                                    ticks: {
-                                        callback: function(v) { return v.toFixed(1) + 'x'; },
-                                        font: { size: 10 }
-                                    }
-                                },
-                                y: { display: false }
-                            }
-                        },
-                        plugins: [bandPlugin]
-                    });
-                })();
-                </script>
-                {% endif %}
-            </div>
-            {% endfor %}
+    <div class="rdcf-target-grid">
+      {% for t in rd.targets %}
+      <div class="rdcf-target-card">
+        <div class="yr-label">{{ t.year }}년말 목표주가</div>
+        <div class="tp">{{ t.target_price }}원</div>
+        {% if t.upside_pct is not none %}
+        <div class="{% if t.upside_pct >= 0 %}upside-up{% else %}upside-down{% endif %}">
+          {% if t.upside_pct >= 0 %}▲{% else %}▼{% endif %}
+          {{ t.upside_pct | abs }}% 현재가 대비
         </div>
+        {% endif %}
+        <div class="sub-rows">
+          <span>프로젝션 {{ t.proj_window }} ({{ t.horizon }}년)</span>
+          {% if t.survival_prob < 1.0 %}
+          <span style="color:#e53e3e;">생존확률 {{ (t.survival_prob*100)|int }}% 반영</span>
+          {% endif %}
+          <span>EV  {{ t.ev_T }}조원</span>
+          <span>현금 {{ t.base_cash_T }}조 · 부채 {{ t.debt_T }}조</span>
+          <span>내재가치 {{ t.equity_T }}조원</span>
+          <span style="padding-top:4px;border-top:1px solid #e2e8f0;margin-top:4px;">
+            PV(FCF) {{ t.pv_fcfs_T }}조 + PV(TV) {{ t.pv_tv_T }}조
+          </span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
 
+    {% if rd.schedule %}
+    <div style="padding:4px 20px 0;">
+      <div style="font-size:12px;font-weight:700;color:#4a5568;margin-bottom:6px;">
+        FCF 스케줄 (조원) &nbsp;
+        <span style="font-weight:400;color:#a0aec0;">
+          <span style="background:#fffbeb;padding:1px 5px;border-radius:3px;">컨센서스</span>
+          &nbsp;
+          <span style="background:#f7fafc;padding:1px 5px;border-radius:3px;color:#718096;">외삽</span>
+        </span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="rdcf-schedule-table">
+          <thead>
+            <tr>
+              <th style="text-align:left;">연도</th>
+              <th>매출 (조원)</th>
+              <th>매출성장</th>
+              <th>EBIT 마진</th>
+              <th>NOPAT</th>
+              <th>재투자</th>
+              <th>FCF</th>
+              <th>구분</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for s in rd.schedule %}
+          <tr class="{% if s.source == 'consensus' %}consensus-row{% else %}ext-row{% endif %}">
+            <td>{{ s.year }}</td>
+            <td>{{ s.revenue }}</td>
+            <td>{% if s.rev_growth is not none %}{{ s.rev_growth }}%{% else %}—{% endif %}</td>
+            <td>{{ s.ebit_margin }}%</td>
+            <td>{{ s.nopat }}</td>
+            <td>{{ s.reinvestment }}</td>
+            <td style="font-weight:{% if s.source=='consensus' %}700{% else %}400{% endif %};">
+              {{ s.fcf }}
+            </td>
+            <td style="font-size:10px;">
+              {% if s.source == 'consensus' %}
+              <span style="color:#b7791f;">컨센서스</span>
+              {% else %}
+              <span style="color:#a0aec0;">외삽</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
     {% endif %}
+
+    <p style="padding:10px 20px 14px;color:#a0aec0;font-size:11px;">
+      Damodaran Rolling DCF v3 ({{ ft_label }}) —
+      재투자 = 매출 증분 ÷ S/Capital({{ rd.stc }}) [Guard 3] ·
+      성장률 → rf 수렴 [Guard 1] ·
+      EBIT 마진 → {{ rd.industry_margin }}% 수렴 [Guard 2] ·
+      TV = FCF<sub>Y+end+1</sub> ÷ (WACC − rf) [Guard 4]
+      {% if rd.firm_type == 'hyper_growth' %} · EV × 생존확률 {{ (rd.survival_prob*100)|int }}% 반영{% endif %}
+      {% if rd.firm_type == 'cyclical' %} · 장기 마진 → 역사적 평균(mid-cycle) 수렴 · 재투자 한도(매출 대비) 적용{% endif %}
+    </p>
+  </div>
+  {% elif result.rdcf and result.rdcf.error %}
+  <div class="card">
+    <div class="card-header">🎯 롤링 DCF 적정주가 (Damodaran)</div>
+    <p style="padding:14px 20px;color:#e53e3e;font-size:13px;white-space:pre-wrap;">{{ result.rdcf.error[:500] }}</p>
+  </div>
+  {% endif %}
+
+  {% endif %} {# result.error #}
+{% endif %} {# result #}
+
+{% if not result %}
+<div style="text-align:center;padding:60px 20px;color:#718096;">
+  <div style="font-size:48px;">🇰🇷</div>
+  <p style="margin-top:12px;font-size:16px;font-weight:600;color:#4a5568;">기업명을 입력해 분석을 시작하세요</p>
+  <p style="margin-top:6px;font-size:13px;">예: 삼성전자 · SK하이닉스 · 현대차 · NAVER · 카카오</p>
+</div>
 {% endif %}
 
 </body>
