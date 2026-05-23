@@ -323,6 +323,14 @@
   <form method="POST" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
     <input type="text" name="company_name" value="{{ company_name }}"
            placeholder="기업명 (예: 삼성전자)" autocomplete="off" autofocus>
+    
+    <select name="life_cycle" style="padding: 9px; border-radius: 6px; border: 1px solid #cbd5e0; font-size: 14px; font-family: inherit; color: #4a5568; outline: none;">
+      <option value="2" {% if life_cycle == '2' %}selected{% endif %}>고성장기 (High Growth)</option>
+      <option value="1" {% if life_cycle == '1' %}selected{% endif %}>초기성장기 (Startup)</option>
+      <option value="3" {% if life_cycle == '3' %}selected{% endif %}>성숙기 (Mature)</option>
+      <option value="4" {% if life_cycle == '4' %}selected{% endif %}>쇠퇴기 (Decline)</option>
+    </select>
+
     <button type="submit">분석</button>
     <span class="hint">국내 기업명을 입력하세요</span>
   </form>
