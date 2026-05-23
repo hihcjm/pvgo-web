@@ -260,9 +260,20 @@
     display: inline-block; padding: 2px 8px; border-radius: 10px;
     font-size: 11px; font-weight: 700; margin-bottom: 6px;
   }
-  .rdcf-mature       { background:#ebf4ff; color:#2b6cb0; }
-  .rdcf-high_growth  { background:#fed7d7; color:#9b2335; }
-  .rdcf-cyclical     { background:#fefcbf; color:#744210; }
+  /* 7-Stage badge colors */
+  .rdcf-mature-stable  { background:#ebf4ff; color:#2b6cb0; }
+  .rdcf-mature-growth  { background:#e6fffa; color:#234e52; }
+  .rdcf-high-growth    { background:#fed7d7; color:#9b2335; }
+  .rdcf-start-up       { background:#fefcbf; color:#744210; }
+  .rdcf-pre-revenue    { background:#ffe4e6; color:#9b1c1c; }
+  .rdcf-cyclical       { background:#faf5ff; color:#553c9a; }
+  .rdcf-declining      { background:#f5f5f4; color:#57534e; }
+  /* WACC decay indicator */
+  .wacc-decay {
+    display:inline-flex; align-items:center; gap:4px;
+    font-size:12px; color:#718096;
+  }
+  .wacc-decay strong { color:#2d3748; }
 
   .rdcf-schedule-table { width:100%; border-collapse:collapse; font-size:12px; }
   .rdcf-schedule-table th {
@@ -570,18 +581,38 @@
   </div>
   {% endif %}
 
-  {# ── Rolling DCF (Damodaran v3) ── #}
+  {# ── Rolling DCF (Damodaran 7-Stage Lifecycle) ── #}
   {% if result.rdcf and not result.rdcf.error %}
   {% set rd = result.rdcf %}
-  {% set ft_label = {'mature':'성숙기','hyper_growth':'고성장·적자','cyclical':'경기순환'}[rd.firm_type] | default(rd.firm_type) %}
-  {% set ft_class = {'mature':'rdcf-mature','hyper_growth':'rdcf-high_growth','cyclical':'rdcf-cyclical'}[rd.firm_type] | default('rdcf-mature') %}
+  {# 7-Stage 표시명 및 배지 색상 매핑 #}
+  {% set stage_label_map = {
+    'Pre-Revenue':  '사전매출',
+    'Start-up':     '스타트업',
+    'High-Growth':  '고성장',
+    'Mature-Growth':'성숙성장',
+    'Mature-Stable':'성숙안정',
+    'Cyclical':     '경기순환',
+    'Declining':    '쇠퇴기'
+  } %}
+  {% set stage_class_map = {
+    'Pre-Revenue':  'rdcf-pre-revenue',
+    'Start-up':     'rdcf-start-up',
+    'High-Growth':  'rdcf-high-growth',
+    'Mature-Growth':'rdcf-mature-growth',
+    'Mature-Stable':'rdcf-mature-stable',
+    'Cyclical':     'rdcf-cyclical',
+    'Declining':    'rdcf-declining'
+  } %}
+  {% set ft_label = stage_label_map.get(rd.stage, rd.stage) %}
+  {% set ft_class = stage_class_map.get(rd.stage, 'rdcf-mature-stable') %}
   <div class="card">
-    <div class="card-header">🎯 롤링 DCF 적정주가 (Damodaran 방법론)
+    <div class="card-header">🎯 롤링 DCF 적정주가 (Damodaran 7-Stage Lifecycle)
       <span style="font-size:11px;font-weight:400;color:#718096;margin-left:8px;">
         FCF = NOPAT − 재투자 (Sales-to-Capital) · 단위: 조원
       </span>
     </div>
 
+    {# ── 파라미터 요약 배지 ── #}
     <div style="padding:12px 20px 0; display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
       <span class="rdcf-badge {{ ft_class }}">
         {{ ft_label }} &nbsp;·&nbsp; {{ rd.horizon }}년 호라이즌
@@ -591,15 +622,25 @@
         생존확률 {{ (rd.survival_prob * 100)|int }}%
       </span>
       {% endif %}
-      <span style="font-size:12px;color:#718096;">
-        WACC <strong>{{ rd.wacc }}%</strong>
-        (rf {{ rd.rf }}% + β{{ rd.beta }} × ERP 5.0%)
+      <span class="wacc-decay">
+        WACC
+        {% if rd.wacc_start != rd.wacc_end %}
+          <strong>{{ rd.wacc_start }}%</strong>
+          <span style="color:#a0aec0;">→</span>
+          <strong>{{ rd.wacc_end }}%</strong>
+          <span style="font-size:11px;color:#a0aec0;">({{ rd.horizon }}년 선형감소)</span>
+        {% else %}
+          <strong>{{ rd.wacc_start }}%</strong>
+          <span style="font-size:11px;color:#a0aec0;">(고정)</span>
+        {% endif %}
+        &nbsp;·&nbsp; rf <strong>{{ rd.rf }}%</strong>
         &nbsp;·&nbsp; 영구성장률 <strong>{{ rd.terminal_g }}%</strong>
-        &nbsp;·&nbsp; EBIT 마진 수렴 <strong>{{ rd.industry_margin }}%</strong>
+        &nbsp;·&nbsp; EBIT 마진수렴 <strong>{{ rd.industry_margin }}%</strong>
         &nbsp;·&nbsp; 법인세 <strong>{{ rd.tax_rate }}%</strong>
       </span>
     </div>
 
+    {# ── 연도별 목표주가 3개 카드 ── #}
     <div class="rdcf-target-grid">
       {% for t in rd.targets %}
       <div class="rdcf-target-card">
@@ -612,7 +653,17 @@
         </div>
         {% endif %}
         <div class="sub-rows">
+          <span>
+            <span class="rdcf-badge {{ stage_class_map.get(t.stage, 'rdcf-mature-stable') }}" style="margin-bottom:0;font-size:10px;">
+              {{ stage_label_map.get(t.stage, t.stage) }}
+            </span>
+          </span>
           <span>프로젝션 {{ t.proj_window }} ({{ t.horizon }}년)</span>
+          {% if t.wacc_start_pct != t.wacc_end_pct %}
+          <span>WACC {{ t.wacc_start_pct }}%→{{ t.wacc_end_pct }}%</span>
+          {% else %}
+          <span>WACC {{ t.wacc_start_pct }}% (고정)</span>
+          {% endif %}
           {% if t.survival_prob < 1.0 %}
           <span style="color:#e53e3e;">생존확률 {{ (t.survival_prob*100)|int }}% 반영</span>
           {% endif %}
@@ -627,6 +678,7 @@
       {% endfor %}
     </div>
 
+    {# ── FCF 전체 스케줄 ── #}
     {% if rd.schedule %}
     <div style="padding:4px 20px 0;">
       <div style="font-size:12px;font-weight:700;color:#4a5568;margin-bottom:6px;">
@@ -648,6 +700,7 @@
               <th>NOPAT</th>
               <th>재투자</th>
               <th>FCF</th>
+              <th>WACC</th>
               <th>구분</th>
             </tr>
           </thead>
@@ -663,6 +716,7 @@
             <td style="font-weight:{% if s.source=='consensus' %}700{% else %}400{% endif %};">
               {{ s.fcf }}
             </td>
+            <td>{% if s.wacc is not none %}{{ s.wacc }}%{% else %}—{% endif %}</td>
             <td style="font-size:10px;">
               {% if s.source == 'consensus' %}
               <span style="color:#b7791f;">컨센서스</span>
@@ -679,18 +733,20 @@
     {% endif %}
 
     <p style="padding:10px 20px 14px;color:#a0aec0;font-size:11px;">
-      Damodaran Rolling DCF v3 ({{ ft_label }}) —
-      재투자 = 매출 증분 ÷ S/Capital({{ rd.stc }}) [Guard 3] ·
-      성장률 → rf 수렴 [Guard 1] ·
-      EBIT 마진 → {{ rd.industry_margin }}% 수렴 [Guard 2] ·
-      TV = FCF<sub>Y+end+1</sub> ÷ (WACC − rf) [Guard 4]
-      {% if rd.firm_type == 'hyper_growth' %} · EV × 생존확률 {{ (rd.survival_prob*100)|int }}% 반영{% endif %}
-      {% if rd.firm_type == 'cyclical' %} · 장기 마진 → 역사적 평균(mid-cycle) 수렴 · 재투자 한도(매출 대비) 적용{% endif %}
+      Damodaran Rolling DCF v4 7-Stage Lifecycle ({{ ft_label }}) —
+      재투자 = ΔRev ÷ S/Capital({{ rd.stc }}) ·
+      성장률 → rf({{ rd.terminal_g }}%) 수렴 ·
+      EBIT 마진 → {{ rd.industry_margin }}% 수렴 ·
+      TV = FCF<sub>n+1</sub> ÷ (WACC<sub>terminal</sub> − rf)
+      {% if rd.survival_prob < 1.0 %} · EV × 생존확률 {{ (rd.survival_prob*100)|int }}% 반영{% endif %}
+      {% if rd.stage == 'Cyclical' %} · 마진 즉시 역사적 평균 수렴 · 재투자 한도 15% of Rev 적용{% endif %}
+      {% if rd.stage == 'Pre-Revenue' %} · WACC 25%→8% 대폭 감소 · 생존확률 20% 적용{% endif %}
+      {% if rd.stage == 'Start-up' %} · WACC 18%→8% 감소 · 생존확률 60% 적용{% endif %}
     </p>
   </div>
   {% elif result.rdcf and result.rdcf.error %}
   <div class="card">
-    <div class="card-header">🎯 롤링 DCF 적정주가 (Damodaran)</div>
+    <div class="card-header">🎯 롤링 DCF 적정주가 (Damodaran 7-Stage)</div>
     <p style="padding:14px 20px;color:#e53e3e;font-size:13px;white-space:pre-wrap;">{{ result.rdcf.error[:500] }}</p>
   </div>
   {% endif %}
