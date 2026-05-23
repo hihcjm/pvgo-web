@@ -512,34 +512,57 @@ def calc_valuation_band(naver_data, current_price):
             "diff_26e": d26e, "diff_pct_26e": dp26e,
         }
 
-    # ── PER ──
-    per_hist = [get_val(rows,'PER',i) for i in hist_idx]
     eps_row  = rows.get('EPS', [])
+
+    # ── PER ──
+    # EPS > 0 인 연도만 PER 히스토리에 포함 (적자 연도 제외)
+    per_hist = []
+    for i in hist_idx:
+        eps_i = get_val(rows, 'EPS', i)
+        per_i = get_val(rows, 'PER', i)
+        if eps_i is not None and eps_i > 0 and per_i is not None and per_i > 0:
+            per_hist.append(per_i)
+
     per_25   = get_val(rows,'PER',idx_25)
     per_26e  = get_val(rows,'PER',idx_26e)
     eps_25   = get_val(rows,'EPS',idx_25)
     eps_26e  = get_val(rows,'EPS',idx_26e)
+    # 현재/추정 시점도 EPS 음수면 이론가 산출 불가 → None 처리
+    if eps_25  is not None and eps_25  <= 0: eps_25  = None
+    if eps_26e is not None and eps_26e <= 0: eps_26e = None
 
     results = [make_band("PER", per_hist, per_25, per_26e,
                           base_25=eps_25, base_26e=eps_26e, base_label="EPS")]
 
     # ── PBR ──
-    pbr_hist = [get_val(rows,'PBR',i) for i in hist_idx]
+    # BPS > 0 인 연도만 포함 (자본잠식 연도 제외)
+    pbr_hist = []
+    for i in hist_idx:
+        bps_i = get_val(rows, 'BPS', i)
+        pbr_i = get_val(rows, 'PBR', i)
+        if bps_i is not None and bps_i > 0 and pbr_i is not None and pbr_i > 0:
+            pbr_hist.append(pbr_i)
+
     bps_25   = get_val(rows,'BPS',idx_25)
     bps_26e  = get_val(rows,'BPS',idx_26e)
+    if bps_25  is not None and bps_25  <= 0: bps_25  = None
+    if bps_26e is not None and bps_26e <= 0: bps_26e = None
+
     results.append(make_band("PBR", pbr_hist,
                               get_val(rows,'PBR',idx_25),
                               get_val(rows,'PBR',idx_26e),
                               base_25=bps_25, base_26e=bps_26e, base_label="BPS"))
 
     # ── PEG ──
+    # 시작·끝 EPS 모두 양수인 구간만 CAGR 계산
     def calc_peg(per_val, eps_idx):
         if per_val is None or per_val <= 0: return None
+        ee = safe_float(eps_row[eps_idx]) if eps_idx < len(eps_row) else None
+        if not ee or ee <= 0: return None          # 분모 EPS 음수 → 불가
         for s in range(max(0, eps_idx-5), eps_idx):
             es = safe_float(eps_row[s]) if s < len(eps_row) else None
-            ee = safe_float(eps_row[eps_idx]) if eps_idx < len(eps_row) else None
             n  = eps_idx - s
-            if es and ee and es > 0 and ee > 0 and n > 0:
+            if es and es > 0 and n > 0:
                 cagr = (ee/es)**(1/n) - 1
                 if cagr > 0:
                     return round(per_val / (cagr*100), 2)
@@ -571,12 +594,13 @@ def calc_valuation_band(naver_data, current_price):
             return round(rev_val / shares_k * 1e5, 0)
         return None
 
+    # PSR: EPS > 0 이고 매출 > 0 인 연도만 히스토리에 포함
     hist_psr = []
     for i in hist_idx:
         per_i = get_val(rows,'PER',i)
         eps_i = safe_float(eps_row[i]) if i < len(eps_row) else None
         rev_i = get_val(rows,'매출액',i)
-        if per_i and eps_i and rev_i:
+        if per_i and eps_i and eps_i > 0 and rev_i and rev_i > 0:
             price_i = per_i * eps_i
             sps_i   = sps(rev_i)
             if sps_i and sps_i > 0:
@@ -627,7 +651,9 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025, stock_code=None):
                 if rev and rev > 0 and cf_data:
                     fcf = cf_data['fcf']   # 억원
                     margin = fcf / rev
-                    hist_fcff_margin.append(margin)
+                    # FCF 음수(적자) 연도는 마진 평균 산출에서 제외
+                    if fcf > 0:
+                        hist_fcff_margin.append(margin)
                     hist_fcf_detail.append({
                         'year': yr,
                         'fcf': round(fcf),
@@ -635,6 +661,7 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025, stock_code=None):
                         'capex': cf_data['capex'],
                         'margin': round(margin*100, 1),
                         'src': 'FnGuide실적',
+                        'excluded': fcf <= 0,   # 음수 연도 표시용
                     })
 
         # FnGuide 데이터 부족시 영업이익 기반 추정
@@ -645,11 +672,12 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025, stock_code=None):
             for i in hist_idx:
                 rev = get_val(rows,'매출액',i)
                 op  = get_val(rows,'영업이익(발표)',i) or get_val(rows,'영업이익',i)
+                # 영업이익 < 0 인 연도는 추정에서 제외
                 if rev and op and rev > 0 and op > 0:
                     fcff = op*(1-TAX) + rev*DA - rev*CAPEX_R
                     margin = fcff / rev
                     hist_fcff_margin.append(margin)
-                    hist_fcf_detail.append({'year': years[i], 'fcf': round(fcff), 'margin': round(margin*100,1), 'src': '영업이익추정'})
+                    hist_fcf_detail.append({'year': years[i], 'fcf': round(fcff), 'margin': round(margin*100,1), 'src': '영업이익추정', 'excluded': False})
 
         if len(hist_fcff_margin) < 2:
             return {"error": "과거 FCF 데이터 부족"}
