@@ -17,22 +17,28 @@ NAVER_HEADERS = {
 }
 
 # ── 컬럼명 정규화 ──────────────────────────────────────────────
-# 네이버 PC HTML 컬럼 헤더가 멀티레벨 튜플로 오므로 마지막 레벨만 추출
-def flatten_col(c):
+# 네이버 주요재무정보 테이블: 3레벨 튜플 ('주요재무정보', '2023.12', 'IFRS연결')
+# 연도는 두 번째 레벨(c[1])에 있음
+def get_col_year(c):
+    """튜플 컬럼에서 연도 문자열 추출. 없으면 None."""
     if isinstance(c, tuple):
-        return str(c[-1])
-    return str(c)
+        for part in c:
+            if re.search(r'20\d\d', str(part)):
+                return str(part)
+    else:
+        if re.search(r'20\d\d', str(c)):
+            return str(c)
+    return None
 
-# 연도 레이블 정규화: '2026/12(E)' 형태 유지, 확정은 '2021/12' 형태
+# 연도 레이블 정규화: '2026/12(E)' 형태, 확정은 '2023/12' 형태
+# 입력: '2023.12', '2026.12(E)' 등
 def norm_year(s):
     s = str(s).strip()
-    # 컨센서스 표시
-    is_est = '(E)' in s or 'E)' in s
-    # 연도 4자리 추출
+    is_est = '(E)' in s
     m = re.search(r'(\d{4})', s)
     year = m.group(1) if m else s
-    # 월 추출
-    mm = re.search(r'/(\d{2})', s)
+    # 월 추출 - '.' 또는 '/' 구분자 모두 처리
+    mm = re.search(r'[./](\d{2})', s)
     month = mm.group(1) if mm else '12'
     label = f"{year}/{month}"
     if is_est:
@@ -70,78 +76,76 @@ def get_naver_finance(stock_code):
     resp.encoding = resp.apparent_encoding or 'utf-8'
     tables = pd.read_html(io.StringIO(resp.text))
 
-    # 재무 테이블 찾기: 컬럼이 튜플이고 '매출액' 행이 있는 테이블
+    # 재무 테이블 찾기: '주요재무정보' 3레벨 튜플 헤더 테이블
+    # 컬럼 구조: ('주요재무정보','주요재무정보','주요재무정보'), ('최근 연간 실적','2023.12','IFRS연결'), ...
     fin_table = None
     for t in tables:
-        cols_flat = [flatten_col(c) for c in t.columns]
-        # 연도 컬럼이 4개 이상이고 EPS 행이 있으면 선택
-        year_cols = [c for c in cols_flat if re.search(r'\d{4}', c)]
-        if len(year_cols) < 4:
+        cols = list(t.columns)
+        # 멀티레벨 튜플이고 '주요재무정보' 포함
+        if not isinstance(cols[0], tuple):
             continue
-        first_col_vals = t.iloc[:, 0].astype(str)
-        if first_col_vals.str.contains('매출액').any() and first_col_vals.str.contains('EPS').any():
+        header_str = ' '.join(str(x) for x in cols[0])
+        if '주요재무정보' not in header_str:
+            continue
+        # 연도 컬럼 3개 이상 있으면 선택
+        year_count = sum(1 for c in cols if get_col_year(c) is not None)
+        if year_count >= 3:
             fin_table = t
             break
 
     if fin_table is None:
         return None
 
-    # 컬럼 평탄화 및 연도 레이블 추출
-    flat_cols = [flatten_col(c) for c in fin_table.columns]
+    # 연도 레이블 및 컬럼 인덱스 추출 (연간 실적만, 분기 제외)
+    # 튜플 첫 번째 레벨에 '연간' 포함된 컬럼만 선택
     year_labels = []
-    year_col_indices = []   # 연도 데이터가 담긴 컬럼 위치
-    for i, c in enumerate(flat_cols):
-        if re.search(r'\d{4}', c):
-            year_labels.append(norm_year(c))
-            year_col_indices.append(i)
+    year_col_indices = []
+    for i, c in enumerate(fin_table.columns):
+        yr_str = get_col_year(c)
+        if yr_str is None:
+            continue
+        # 튜플이면 첫 번째 레벨에 '연간' 있어야 함 (분기 제외)
+        if isinstance(c, tuple) and '연간' not in str(c[0]):
+            continue
+        year_labels.append(norm_year(yr_str))
+        year_col_indices.append(i)
 
     if not year_labels:
         return None
 
-    # 행 이름 → 값 딕셔너리 구성
-    # 행 이름은 첫 번째 컬럼
+    # 행 이름 매핑 (실제 네이버 row 이름 기준, 정확 일치 우선)
     ROW_ALIASES = {
-        '매출액':           '매출액',
-        '영업이익':         '영업이익',
-        '영업이익(발표기준)': '영업이익(발표)',
-        '세전계속사업이익':  '세전이익',
-        '당기순이익':       '당기순이익',
-        '당기순이익(지배)':  '당기순이익(지배)',
-        'ROE(%)':           'ROE',
-        'ROA(%)':           'ROA',
-        '영업이익률':       '영업이익률',
-        '순이익률':         '순이익률',
-        'EPS(원)':          'EPS',
-        'PER(배)':          'PER',
-        'BPS(원)':          'BPS',
-        'PBR(배)':          'PBR',
-        '현금DPS(원)':      'DPS',
-        '현금배당수익률':   '배당수익률',
-        '현금배당성향(%)':  '배당성향',
-        'CAPEX':            'CAPEX',
-        'FCF':              'FCF',
-        '발행주식수(보통주)': '발행주식수',
-        '영업활동현금흐름':  '영업CF',
-        '투자활동현금흐름':  '투자CF',
-        '재무활동현금흐름':  '재무CF',
-        '부채비율':         '부채비율',
-        '자본유보율':       '자본유보율',
-        '자산총계':         '자산총계',
-        '부채총계':         '부채총계',
-        '자본총계':         '자본총계',
+        '매출액':         '매출액',
+        '영업이익':       '영업이익',
+        '영업이익률':     '영업이익률',
+        '당기순이익':     '당기순이익',
+        '순이익률':       '순이익률',
+        'ROE(지배주주)':  'ROE',
+        'ROE(%)':         'ROE',
+        '부채비율':       '부채비율',
+        '당좌비율':       '당좌비율',
+        '유보율':         '자본유보율',
+        'EPS(원)':        'EPS',
+        'PER(배)':        'PER',
+        'BPS(원)':        'BPS',
+        'PBR(배)':        'PBR',
+        '주당배당금(원)': 'DPS',
+        '시가배당률(%)':  '배당수익률',
+        '배당성향(%)':    '배당성향',
     }
 
     rows = {}
     for _, row in fin_table.iterrows():
         raw_name = str(row.iloc[0]).strip()
-        # 별칭 매핑
-        mapped = None
-        for alias, key in ROW_ALIASES.items():
-            if alias in raw_name or raw_name in alias:
-                mapped = key
-                break
+        # 정확 일치 우선, 그 다음 포함 관계
+        mapped = ROW_ALIASES.get(raw_name)
         if mapped is None:
-            mapped = raw_name  # 매핑 없으면 원본 사용
+            for alias, key in ROW_ALIASES.items():
+                if alias in raw_name:
+                    mapped = key
+                    break
+        if mapped is None:
+            mapped = raw_name
 
         vals = []
         for ci in year_col_indices:
