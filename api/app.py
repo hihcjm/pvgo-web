@@ -5,7 +5,6 @@ import FinanceDataReader as fdr
 import re
 import math
 import os
-import json
 
 template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'templates')
 app = Flask(__name__, template_folder=template_dir)
@@ -16,7 +15,30 @@ NAVER_HEADERS = {
     'Accept-Language': 'ko-KR,ko;q=0.9',
 }
 
-# --- 1. 기업명 -> 종목코드 변환 ---
+# ── 컬럼명 정규화 ──────────────────────────────────────────────
+# 네이버 PC HTML 컬럼 헤더가 멀티레벨 튜플로 오므로 마지막 레벨만 추출
+def flatten_col(c):
+    if isinstance(c, tuple):
+        return str(c[-1])
+    return str(c)
+
+# 연도 레이블 정규화: '2026/12(E)' 형태 유지, 확정은 '2021/12' 형태
+def norm_year(s):
+    s = str(s).strip()
+    # 컨센서스 표시
+    is_est = '(E)' in s or 'E)' in s
+    # 연도 4자리 추출
+    m = re.search(r'(\d{4})', s)
+    year = m.group(1) if m else s
+    # 월 추출
+    mm = re.search(r'/(\d{2})', s)
+    month = mm.group(1) if mm else '12'
+    label = f"{year}/{month}"
+    if is_est:
+        label += '(E)'
+    return label
+
+# ── 1. 종목코드 변환 ───────────────────────────────────────────
 def get_stock_code(company_name):
     try:
         df_krx = fdr.StockListing('KRX')
@@ -27,93 +49,131 @@ def get_stock_code(company_name):
     except:
         return None
 
-# --- 2. 네이버 증권 모바일 API로 연간 재무 데이터 가져오기 ---
+# ── 2. 네이버 PC Financial Summary 크롤링 ─────────────────────
 def get_naver_finance(stock_code):
     """
-    m.stock.naver.com API에서 연간 재무 + 컨센서스 데이터를 가져옴.
+    finance.naver.com/item/main.naver 의 '주요재무정보' 테이블(멀티레벨 헤더)을 파싱.
     반환: {
-      'years': ['2022', '2023', '2024', '2025', '2026E'],
-      'rows': {'매출액': [v1,v2,...], 'EPS': [...], ...}
+      'years':     ['2021/12', ..., '2026/12(E)', '2027/12(E)', '2028/12(E)'],
+      'hist_idx':  [0,1,2,3,4],   # 확정 연도 인덱스
+      'est_idx':   [5,6,7],       # 컨센서스 인덱스
+      'rows':      {'매출액': [v0,...,v7], 'EPS': [...], ...}
     }
     """
-    url = f"https://m.stock.naver.com/api/stock/{stock_code}/finance/annual"
-    resp = requests.get(url, headers=NAVER_HEADERS, timeout=15)
+    url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
+    resp = requests.get(url, headers=NAVER_HEADERS, timeout=20)
     if resp.status_code != 200:
         return None
 
-    data = resp.json()
-    finance_info = data.get('financeInfo', {})
-    title_list = finance_info.get('trTitleList', [])   # 연도 컬럼
-    row_list   = finance_info.get('rowList', [])        # 지표 행
+    # euc-kr 디코딩
+    tables = pd.read_html(resp.content, encoding='euc-kr', flavor='lxml')
 
-    if not title_list or not row_list:
+    # 재무 테이블 찾기: 컬럼이 튜플이고 '매출액' 행이 있는 테이블
+    fin_table = None
+    for t in tables:
+        cols_flat = [flatten_col(c) for c in t.columns]
+        # 연도 컬럼이 4개 이상이고 EPS 행이 있으면 선택
+        year_cols = [c for c in cols_flat if re.search(r'\d{4}', c)]
+        if len(year_cols) < 4:
+            continue
+        first_col_vals = t.iloc[:, 0].astype(str)
+        if first_col_vals.str.contains('매출액').any() and first_col_vals.str.contains('EPS').any():
+            fin_table = t
+            break
+
+    if fin_table is None:
         return None
 
-    # 연도 키 순서 정렬 (202112 → 202212 → ...)
-    years_sorted = sorted(title_list, key=lambda x: x['key'])
-    year_keys    = [y['key'] for y in years_sorted]
-    year_labels  = []
-    for y in years_sorted:
-        label = y['title'].replace('.', '/').rstrip('/')  # '2026.12.' → '2026/12'
-        if y.get('isConsensus') == 'Y':
-            label += '(E)'
-        year_labels.append(label)
+    # 컬럼 평탄화 및 연도 레이블 추출
+    flat_cols = [flatten_col(c) for c in fin_table.columns]
+    year_labels = []
+    year_col_indices = []   # 연도 데이터가 담긴 컬럼 위치
+    for i, c in enumerate(flat_cols):
+        if re.search(r'\d{4}', c):
+            year_labels.append(norm_year(c))
+            year_col_indices.append(i)
 
-    # 행 이름 한글 → 내부 키 매핑
-    NAME_MAP = {
-        '매출액':   '매출액',
-        '영업이익': '영업이익',
-        '당기순이익': '당기순이익',
-        'ROE':      'ROE',
-        'EPS':      'EPS',
-        'PER':      'PER',
-        'BPS':      'BPS',
-        'PBR':      'PBR',
-        'DPS':      'DPS',
-        '배당수익률': '배당수익률',
-        '영업이익률': '영업이익률',
-        '순이익률':  '순이익률',
+    if not year_labels:
+        return None
+
+    # 행 이름 → 값 딕셔너리 구성
+    # 행 이름은 첫 번째 컬럼
+    ROW_ALIASES = {
+        '매출액':           '매출액',
+        '영업이익':         '영업이익',
+        '영업이익(발표기준)': '영업이익(발표)',
+        '세전계속사업이익':  '세전이익',
+        '당기순이익':       '당기순이익',
+        '당기순이익(지배)':  '당기순이익(지배)',
+        'ROE(%)':           'ROE',
+        'ROA(%)':           'ROA',
+        '영업이익률':       '영업이익률',
+        '순이익률':         '순이익률',
+        'EPS(원)':          'EPS',
+        'PER(배)':          'PER',
+        'BPS(원)':          'BPS',
+        'PBR(배)':          'PBR',
+        '현금DPS(원)':      'DPS',
+        '현금배당수익률':   '배당수익률',
+        '현금배당성향(%)':  '배당성향',
+        'CAPEX':            'CAPEX',
+        'FCF':              'FCF',
+        '발행주식수(보통주)': '발행주식수',
+        '영업활동현금흐름':  '영업CF',
+        '투자활동현금흐름':  '투자CF',
+        '재무활동현금흐름':  '재무CF',
+        '부채비율':         '부채비율',
+        '자본유보율':       '자본유보율',
+        '자산총계':         '자산총계',
+        '부채총계':         '부채총계',
+        '자본총계':         '자본총계',
     }
 
     rows = {}
-    for row in row_list:
-        title = row.get('title', '').strip()
-        key = NAME_MAP.get(title, title)
-        cols = row.get('columns', {})
+    for _, row in fin_table.iterrows():
+        raw_name = str(row.iloc[0]).strip()
+        # 별칭 매핑
+        mapped = None
+        for alias, key in ROW_ALIASES.items():
+            if alias in raw_name or raw_name in alias:
+                mapped = key
+                break
+        if mapped is None:
+            mapped = raw_name  # 매핑 없으면 원본 사용
+
         vals = []
-        for yk in year_keys:
-            cell = cols.get(yk, {})
-            v = cell.get('value', '-') if cell else '-'
-            vals.append(v)
-        rows[key] = vals
+        for ci in year_col_indices:
+            cell = row.iloc[ci]
+            vals.append(str(cell).strip() if not pd.isna(cell) else '-')
+        rows[mapped] = vals
 
-    return {'years': year_labels, 'year_keys': year_keys, 'rows': rows}
+    hist_idx = [i for i, y in enumerate(year_labels) if '(E)' not in y]
+    est_idx  = [i for i, y in enumerate(year_labels) if '(E)' in y]
 
-# --- 3. 네이버 PC 메인에서 베타 가져오기 ---
-def get_beta_naver(stock_code):
+    return {
+        'years':    year_labels,
+        'hist_idx': hist_idx,
+        'est_idx':  est_idx,
+        'rows':     rows,
+    }
+
+# ── 3. 유틸 ──────────────────────────────────────────────────
+def safe_float(val):
     try:
-        url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
-        resp = requests.get(url, headers=NAVER_HEADERS, timeout=15)
-        tables = pd.read_html(resp.content, encoding='euc-kr')
-        # 테이블 5번(업종비교)에서 베타 행 찾기
-        for t in tables:
-            for col in t.columns:
-                vals = t[col].astype(str)
-                for i, v in enumerate(vals):
-                    if '베타' in v or 'Beta' in v:
-                        # 같은 행의 다음 컬럼에서 숫자 추출
-                        row = t.iloc[i]
-                        for cell in row:
-                            m = re.search(r'\d+\.\d+', str(cell))
-                            if m:
-                                beta = float(m.group())
-                                if 0.1 < beta < 5.0:
-                                    return beta
+        if val is None: return None
+        s = str(val).replace(',', '').replace('%', '').strip()
+        if s in ('-', '', 'nan', 'None', 'NaN'): return None
+        m = re.search(r'-?\d+\.?\d*', s)
+        return float(m.group()) if m else None
     except:
-        pass
-    return 1.0  # fallback
+        return None
 
-# --- 4. 현재주가 조회 ---
+def get_val(rows, key, idx):
+    row = rows.get(key, [])
+    if idx is None or idx >= len(row): return None
+    return safe_float(row[idx])
+
+# ── 4. 현재주가 ────────────────────────────────────────────────
 def get_current_price(stock_code):
     try:
         start = pd.Timestamp.now().date() - pd.Timedelta(days=7)
@@ -124,7 +184,7 @@ def get_current_price(stock_code):
         pass
     return None
 
-# --- 5. 무위험률 (미국채 10년물) ---
+# ── 5. 무위험률 ────────────────────────────────────────────────
 def get_risk_free_rate():
     try:
         df = fdr.DataReader('^TNX', pd.Timestamp.now().date() - pd.Timedelta(days=5))
@@ -134,43 +194,38 @@ def get_risk_free_rate():
                 return val / 100
     except:
         pass
-    return 0.044  # fallback: 4.4%
+    return 0.044
 
-# --- 6. 유틸 ---
-def safe_float(val):
+# ── 6. 베타 (네이버 PC 업종비교 테이블) ─────────────────────────
+def get_beta_naver(stock_code):
     try:
-        if val is None or str(val).strip() in ('-', '', 'nan', 'None'):
-            return None
-        s = str(val).replace(',', '').replace('%', '').strip()
-        m = re.search(r'-?\d+\.?\d*', s)
-        return float(m.group()) if m else None
+        url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
+        resp = requests.get(url, headers=NAVER_HEADERS, timeout=15)
+        tables = pd.read_html(resp.content, encoding='euc-kr')
+        for t in tables:
+            for col in t.columns:
+                for i, v in enumerate(t[col].astype(str)):
+                    if '베타' in v:
+                        for cell in t.iloc[i].astype(str):
+                            m = re.search(r'\d+\.\d+', cell)
+                            if m:
+                                b = float(m.group())
+                                if 0.1 < b < 5.0:
+                                    return b
     except:
-        return None
+        pass
+    return 1.0
 
-def avg_of(vals, positive_only=False):
-    nums = [safe_float(v) for v in vals]
-    nums = [v for v in nums if v is not None]
-    if positive_only:
-        nums = [v for v in nums if v > 0]
-    return sum(nums) / len(nums) if nums else None
-
-# --- 7. 밴드 분석 ---
+# ── 7. 밴드 분석 ───────────────────────────────────────────────
 def calc_valuation_band(naver_data, current_price):
-    rows  = naver_data['rows']
-    years = naver_data['years']
-    n     = len(years)
+    rows     = naver_data['rows']
+    years    = naver_data['years']
+    hist_idx = naver_data['hist_idx']
+    est_idx  = naver_data['est_idx']
 
-    # 컨센서스 여부로 hist/estimate 구분
-    hist_idx = [i for i, y in enumerate(years) if '(E)' not in y]
-    est_idx  = [i for i, y in enumerate(years) if '(E)' in y]
-
-    # 25년(마지막 확정), 26E(첫 번째 컨센서스)
+    # 25년(마지막 확정), 26E(첫 컨센서스)
     idx_25  = hist_idx[-1] if hist_idx else None
     idx_26e = est_idx[0]   if est_idx  else None
-
-    def get_vals(key, idxs):
-        row = rows.get(key, [])
-        return [safe_float(row[i]) for i in idxs if i < len(row)]
 
     def make_band(metric, hist_vals, val_25, val_26e,
                   base_25=None, base_26e=None, base_label=None, no_theory=False):
@@ -179,7 +234,7 @@ def calc_valuation_band(naver_data, current_price):
             return {"metric": metric, "error": "데이터 부족"}
 
         avg = sum(hist_vals) / len(hist_vals)
-        std = math.sqrt(sum((v - avg) ** 2 for v in hist_vals) / len(hist_vals))
+        std = math.sqrt(sum((v - avg)**2 for v in hist_vals) / len(hist_vals))
 
         def grade(val):
             if val is None or std == 0: return None
@@ -198,17 +253,16 @@ def calc_valuation_band(naver_data, current_price):
             d = tp - current_price
             return f"{d:+,.0f}", f"{d / current_price * 100:+.1f}"
 
-        tp25  = theory(base_25)
-        tp26e = theory(base_26e)
-        d25,  dp25  = diff_info(tp25)
+        tp25, tp26e = theory(base_25), theory(base_26e)
+        d25, dp25   = diff_info(tp25)
         d26e, dp26e = diff_info(tp26e)
 
         bands = {k: round(avg + s * std, 2)
-                 for k, s in [('m3s',-3),('m2s',-2),('m1s',-1),('avg',0),('p1s',1),('p2s',2),('p3s',3)]}
-
+                 for k, s in [('m3s',-3),('m2s',-2),('m1s',-1),
+                               ('avg',0),('p1s',1),('p2s',2),('p3s',3)]}
         return {
             "metric": metric, "base_label": base_label,
-            "hist_avg": round(avg, 2), "hist_std": round(std, 2),
+            "hist_avg": round(avg,2), "hist_std": round(std,2),
             "bands": bands,
             "val_25":  round(val_25,  2) if val_25  is not None else None,
             "val_26e": round(val_26e, 2) if val_26e is not None else None,
@@ -219,185 +273,179 @@ def calc_valuation_band(naver_data, current_price):
             "diff_26e": d26e, "diff_pct_26e": dp26e,
         }
 
-    results = []
-    per_hist = get_vals('PER', hist_idx)
+    # ── PER ──
+    per_hist = [get_val(rows,'PER',i) for i in hist_idx]
     eps_row  = rows.get('EPS', [])
-    bps_row  = rows.get('BPS', [])
-    pbr_hist = get_vals('PBR', hist_idx)
+    per_25   = get_val(rows,'PER',idx_25)
+    per_26e  = get_val(rows,'PER',idx_26e)
+    eps_25   = get_val(rows,'EPS',idx_25)
+    eps_26e  = get_val(rows,'EPS',idx_26e)
 
-    per_25  = safe_float(rows.get('PER',  [])[idx_25])  if idx_25  is not None and idx_25  < len(rows.get('PER', [])) else None
-    per_26e = safe_float(rows.get('PER',  [])[idx_26e]) if idx_26e is not None and idx_26e < len(rows.get('PER', [])) else None
-    eps_25  = safe_float(eps_row[idx_25])  if idx_25  is not None and idx_25  < len(eps_row) else None
-    eps_26e = safe_float(eps_row[idx_26e]) if idx_26e is not None and idx_26e < len(eps_row) else None
-    bps_25  = safe_float(bps_row[idx_25])  if idx_25  is not None and idx_25  < len(bps_row) else None
-    bps_26e = safe_float(bps_row[idx_26e]) if idx_26e is not None and idx_26e < len(bps_row) else None
-    pbr_25  = safe_float(rows.get('PBR',  [])[idx_25])  if idx_25  is not None and idx_25  < len(rows.get('PBR', [])) else None
-    pbr_26e = safe_float(rows.get('PBR',  [])[idx_26e]) if idx_26e is not None and idx_26e < len(rows.get('PBR', [])) else None
+    results = [make_band("PER", per_hist, per_25, per_26e,
+                          base_25=eps_25, base_26e=eps_26e, base_label="EPS")]
 
-    # PER 밴드
-    results.append(make_band("PER", per_hist, per_25, per_26e,
-                              base_25=eps_25, base_26e=eps_26e, base_label="EPS"))
-    # PBR 밴드
-    results.append(make_band("PBR", pbr_hist, pbr_25, pbr_26e,
+    # ── PBR ──
+    pbr_hist = [get_val(rows,'PBR',i) for i in hist_idx]
+    bps_25   = get_val(rows,'BPS',idx_25)
+    bps_26e  = get_val(rows,'BPS',idx_26e)
+    results.append(make_band("PBR", pbr_hist,
+                              get_val(rows,'PBR',idx_25),
+                              get_val(rows,'PBR',idx_26e),
                               base_25=bps_25, base_26e=bps_26e, base_label="BPS"))
 
-    # PEG 밴드
-    def calc_peg(per_val, eps_vals, end_i):
+    # ── PEG ──
+    def calc_peg(per_val, eps_idx):
         if per_val is None or per_val <= 0: return None
-        for start_i in range(max(0, end_i - 5), end_i):
-            es = safe_float(eps_vals[start_i]) if start_i < len(eps_vals) else None
-            ee = safe_float(eps_vals[end_i])   if end_i   < len(eps_vals) else None
-            n  = end_i - start_i
+        for s in range(max(0, eps_idx-5), eps_idx):
+            es = safe_float(eps_row[s]) if s < len(eps_row) else None
+            ee = safe_float(eps_row[eps_idx]) if eps_idx < len(eps_row) else None
+            n  = eps_idx - s
             if es and ee and es > 0 and ee > 0 and n > 0:
-                cagr = (ee / es) ** (1 / n) - 1
+                cagr = (ee/es)**(1/n) - 1
                 if cagr > 0:
-                    return round(per_val / (cagr * 100), 2)
+                    return round(per_val / (cagr*100), 2)
         return None
 
-    hist_peg = [calc_peg(safe_float(rows.get('PER',[])[i]), eps_row, i)
-                for i in hist_idx if i < len(rows.get('PER',[]))]
+    hist_peg = [calc_peg(get_val(rows,'PER',i), i) for i in hist_idx]
     hist_peg = [v for v in hist_peg if v is not None]
-    peg_25   = calc_peg(per_25,  eps_row, idx_25)  if idx_25  is not None else None
-    peg_26e  = calc_peg(per_26e, eps_row, idx_26e) if idx_26e is not None else None
-    results.append(make_band("PEG", hist_peg, peg_25, peg_26e, no_theory=True))
+    results.append(make_band("PEG", hist_peg,
+                              calc_peg(per_25, idx_25) if idx_25 is not None else None,
+                              calc_peg(per_26e, idx_26e) if idx_26e is not None else None,
+                              no_theory=True))
 
-    # PSR 밴드
-    rev_row   = rows.get('매출액', [])
-    shares_fixed = 5919638  # 천주 (고정값, 크롤링 불가시 fallback)
-    # 발행주식수는 API에 없으므로 현재주가·PER·EPS 역산으로 대체
-    def calc_sps(rev_val, shares_k):
+    # ── PSR ──
+    # 발행주식수(보통주) 단위: 주 → 천주로 변환
+    shares_k = None
+    share_row = rows.get('발행주식수', [])
+    for i in reversed(hist_idx):          # 가장 최근 확정치
+        v = safe_float(share_row[i]) if i < len(share_row) else None
+        if v and v > 1e6:
+            shares_k = v / 1000           # 주 → 천주
+            break
+    if shares_k is None:
+        shares_k = 5919638                # fallback
+
+    rev_row = rows.get('매출액', [])
+
+    def sps(rev_val):
         if rev_val and shares_k and shares_k > 0:
             return round(rev_val / shares_k * 1e5, 0)
         return None
 
-    # 역산 shares: PER × EPS = 주가 → shares는 별도 조회 필요, PSR은 생략하고 현재주가 기준만
     hist_psr = []
     for i in hist_idx:
-        per_i = safe_float(rows.get('PER', [])[i]) if i < len(rows.get('PER', [])) else None
+        per_i = get_val(rows,'PER',i)
         eps_i = safe_float(eps_row[i]) if i < len(eps_row) else None
-        rev_i = safe_float(rev_row[i]) if i < len(rev_row) else None
-        if per_i and eps_i and rev_i and rev_i > 0:
+        rev_i = get_val(rows,'매출액',i)
+        if per_i and eps_i and rev_i:
             price_i = per_i * eps_i
-            sps_i = calc_sps(rev_i, shares_fixed)
+            sps_i   = sps(rev_i)
             if sps_i and sps_i > 0:
                 hist_psr.append(round(price_i / sps_i, 2))
 
-    rev_25  = safe_float(rev_row[idx_25])  if idx_25  is not None and idx_25  < len(rev_row) else None
-    rev_26e = safe_float(rev_row[idx_26e]) if idx_26e is not None and idx_26e < len(rev_row) else None
-    sps_25  = calc_sps(rev_25,  shares_fixed)
-    sps_26e = calc_sps(rev_26e, shares_fixed)
-    psr_25  = round(current_price / sps_25,  2) if current_price and sps_25  else None
-    psr_26e = round(current_price / sps_26e, 2) if current_price and sps_26e else None
+    sps_25   = sps(get_val(rows,'매출액',idx_25))
+    sps_26e  = sps(get_val(rows,'매출액',idx_26e))
+    psr_25   = round(current_price/sps_25,  2) if current_price and sps_25  else None
+    psr_26e  = round(current_price/sps_26e, 2) if current_price and sps_26e else None
     results.append(make_band("PSR", hist_psr, psr_25, psr_26e,
                               base_25=sps_25, base_26e=sps_26e, base_label="SPS"))
 
     return results
 
-# --- 8. DCF 가치평가 (영업이익 기반 간이 FCFF) ---
+# ── 8. DCF (FCF 직접 사용 + 컨센서스 26~28E) ─────────────────
 def calc_dcf(naver_data, r, current_price, g_terminal=0.025):
     """
-    영업이익 × (1-세율) = NOPAT → FCFF 마진 과거 평균으로 컨센서스 추정
+    네이버 Financial Summary의 FCF를 직접 사용.
+    과거 FCF/매출액 마진 평균 → 컨센서스 매출액에 적용해 26~28E FCFF 추정.
+    발행주식수도 테이블에서 직접 읽음.
     """
     try:
-        rows  = naver_data['rows']
-        years = naver_data['years']
-
-        hist_idx = [i for i, y in enumerate(years) if '(E)' not in y]
-        est_idx  = [i for i, y in enumerate(years) if '(E)' in y]
+        rows     = naver_data['rows']
+        years    = naver_data['years']
+        hist_idx = naver_data['hist_idx']
+        est_idx  = naver_data['est_idx']
 
         rev_row = rows.get('매출액', [])
-        op_row  = rows.get('영업이익', [])
+        fcf_row = rows.get('FCF', [])
+        op_row  = rows.get('영업이익(발표)', rows.get('영업이익', []))
 
-        if not rev_row or not op_row:
-            return {"error": "매출액/영업이익 데이터 없음"}
+        if not rev_row:
+            return {"error": "매출액 데이터 없음"}
 
-        # 과거 영업이익률(FCFF 마진 proxy, 세율 22% 가정)
-        TAX_RATE = 0.22
-        DA_RATIO  = 0.05   # D&A: 매출액의 5% 가정
-        CAPEX_RATIO = 0.06  # CAPEX: 매출액의 6% 가정
-
+        # ── 과거 FCF 마진 계산 (FCF가 있으면 직접, 없으면 영업이익 기반) ──
         hist_fcff_margin = []
         for i in hist_idx:
-            rev = safe_float(rev_row[i]) if i < len(rev_row) else None
-            op  = safe_float(op_row[i])  if i < len(op_row)  else None
-            if rev and op and rev > 0 and op > 0:
-                nopat = op * (1 - TAX_RATE)
-                fcff  = nopat + rev * DA_RATIO - rev * CAPEX_RATIO
-                hist_fcff_margin.append(fcff / rev)
+            rev = get_val(rows, '매출액', i)
+            fcf = safe_float(fcf_row[i]) if i < len(fcf_row) else None
+            if rev and rev > 0 and fcf is not None:
+                hist_fcff_margin.append(fcf / rev)
+
+        # FCF 데이터 부족시 영업이익 기반으로 대체
+        if len(hist_fcff_margin) < 2:
+            TAX = 0.22; DA = 0.05; CAPEX_R = 0.06
+            hist_fcff_margin = []
+            for i in hist_idx:
+                rev = get_val(rows,'매출액',i)
+                op  = get_val(rows,'영업이익(발표)',i) or get_val(rows,'영업이익',i)
+                if rev and op and rev > 0 and op > 0:
+                    fcff = op*(1-TAX) + rev*DA - rev*CAPEX_R
+                    hist_fcff_margin.append(fcff / rev)
 
         if len(hist_fcff_margin) < 2:
-            return {"error": "과거 FCFF 데이터 부족"}
+            return {"error": "과거 FCF 데이터 부족"}
 
         avg_fcff_margin = sum(hist_fcff_margin) / len(hist_fcff_margin)
 
-        # 컨센서스 연도별 FCFF 추정
+        # ── 컨센서스 FCF 추정 (26E~28E) ──
         fcf_years = []
         for i in est_idx:
             label = years[i]
-            rev_e = safe_float(rev_row[i]) if i < len(rev_row) else None
-            op_e  = safe_float(op_row[i])  if i < len(op_row)  else None
-            if rev_e and op_e and op_e > 0:
-                nopat_e = op_e * (1 - TAX_RATE)
-                da_e    = rev_e * DA_RATIO
-                capex_e = rev_e * CAPEX_RATIO
-                fcff_e  = nopat_e + da_e - capex_e
+            rev_e = get_val(rows, '매출액', i)
+            op_e  = get_val(rows, '영업이익(발표)', i) or get_val(rows, '영업이익', i)
+            fcf_e_direct = safe_float(fcf_row[i]) if i < len(fcf_row) else None
+
+            if fcf_e_direct is not None and fcf_e_direct > 0:
+                fcf_years.append((label, fcf_e_direct))
+            elif rev_e and op_e and op_e > 0:
+                TAX = 0.22; DA = 0.05; CAPEX_R = 0.06
+                fcff_e = op_e*(1-TAX) + rev_e*DA - rev_e*CAPEX_R
+                fcf_years.append((label, fcff_e))
             elif rev_e:
-                fcff_e = rev_e * avg_fcff_margin
-            else:
-                continue
-            fcf_years.append((label, fcff_e))
+                fcf_years.append((label, rev_e * avg_fcff_margin))
 
         if not fcf_years:
-            return {"error": "컨센서스 매출액 데이터 없음"}
+            return {"error": "컨센서스 FCF 추정 불가"}
 
         if r <= g_terminal:
             return {"error": f"할인율({r*100:.1f}%)이 터미널성장률({g_terminal*100:.1f}%)보다 낮음"}
 
-        # 발행주식수: FinanceDataReader로 시가총액/주가 역산 또는 고정값
-        shares = 5919638  # 천주 (삼성전자 기준 fallback — 아래에서 동적으로 계산)
-        try:
-            start = pd.Timestamp.now().date() - pd.Timedelta(days=7)
-            price_df = fdr.DataReader(naver_data.get('stock_code',''), start)
-            # 발행주식수는 별도 조회 불가 → 네이버 API에도 없음 → 고정 사용
-        except:
-            pass
-
-        # 발행주식수를 네이버 PC에서 가져오기 시도
-        try:
-            pc_url = f"https://finance.naver.com/item/main.naver?code={naver_data.get('stock_code','')}"
-            pc_resp = requests.get(pc_url, headers=NAVER_HEADERS, timeout=10)
-            pc_tables = pd.read_html(pc_resp.content, encoding='euc-kr')
-            for t in pc_tables:
-                for col in t.columns:
-                    for i, v in enumerate(t[col].astype(str)):
-                        if '발행주식수' in v or '상장주식수' in v:
-                            row_vals = t.iloc[i].astype(str)
-                            for cell in row_vals:
-                                m = re.search(r'[\d,]{7,}', cell.replace(' ', ''))
-                                if m:
-                                    s = safe_float(m.group())
-                                    if s and s > 1e6:
-                                        shares = s / 1000  # 주 → 천주
-                                        break
-        except:
-            pass
+        # ── 발행주식수 (주 단위 → 천주 변환) ──
+        shares_k = None
+        share_row = rows.get('발행주식수', [])
+        for i in reversed(hist_idx):
+            v = safe_float(share_row[i]) if i < len(share_row) else None
+            if v and v > 1e6:
+                shares_k = v / 1000
+                break
+        if not shares_k:
+            shares_k = 5919638
 
         def pv_to_price(pv_total):
-            return pv_total * 1e8 / (shares * 1e3)
+            return pv_total * 1e8 / (shares_k * 1e3)
 
         def diff_str(fv):
             if not current_price: return None, None
             d = fv - current_price
-            return f"{d:+,.0f}", f"{d / current_price * 100:+.1f}"
+            return f"{d:+,.0f}", f"{d/current_price*100:+.1f}"
 
         pv_fcfs = []
         cumulative_pv = 0
         for t_idx, (label, fcf_e) in enumerate(fcf_years):
             n = t_idx + 1
-            pv = fcf_e / (1 + r) ** n
+            pv = fcf_e / (1+r)**n
             cumulative_pv += pv
-            tv_n    = fcf_e * (1 + g_terminal) / (r - g_terminal)
-            pv_tv_n = tv_n / (1 + r) ** n
+            tv_n    = fcf_e * (1+g_terminal) / (r-g_terminal)
+            pv_tv_n = tv_n / (1+r)**n
             total_pv_n = cumulative_pv + pv_tv_n
             fv_n = pv_to_price(total_pv_n)
             d, dp = diff_str(fv_n)
@@ -408,69 +456,76 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025):
             })
 
         return {
-            "avg_fcff_margin": round(avg_fcff_margin * 100, 1),
-            "avg_tax_rate":    round(TAX_RATE * 100, 1),
-            "g_terminal":      round(g_terminal * 100, 1),
-            "r":               round(r * 100, 2),
+            "avg_fcff_margin": round(avg_fcff_margin*100, 1),
+            "avg_tax_rate":    22.0,
+            "g_terminal":      round(g_terminal*100, 1),
+            "r":               round(r*100, 2),
             "pv_fcfs":         pv_fcfs,
         }
     except Exception as e:
         return {"error": f"DCF 계산 오류: {e}"}
 
-# --- 9. 재무 테이블 HTML 생성 ---
+# ── 9. 재무 테이블 HTML ────────────────────────────────────────
 def build_raw_table_html(naver_data):
     rows  = naver_data['rows']
     years = naver_data['years']
 
-    # 표시할 행 순서
-    DISPLAY_ROWS = [
-        '매출액', '영업이익', '당기순이익',
-        '영업이익률', '순이익률', 'ROE',
-        'EPS', 'BPS', 'DPS', 'PER', 'PBR', '배당수익률',
+    DISPLAY = [
+        ('매출액',     '매출액'),
+        ('영업이익(발표)', '영업이익'),
+        ('당기순이익', '당기순이익'),
+        ('FCF',       'FCF'),
+        ('영업이익률', '영업이익률(%)'),
+        ('순이익률',   '순이익률(%)'),
+        ('ROE',       'ROE(%)'),
+        ('ROA',       'ROA(%)'),
+        ('EPS',       'EPS(원)'),
+        ('BPS',       'BPS(원)'),
+        ('DPS',       'DPS(원)'),
+        ('PER',       'PER(배)'),
+        ('PBR',       'PBR(배)'),
+        ('배당수익률', '배당수익률(%)'),
+        ('부채비율',   '부채비율(%)'),
+        ('발행주식수', '발행주식수(주)'),
     ]
 
-    header = '<thead><tr><th>항목</th>' + ''.join(f'<th>{y}</th>' for y in years) + '</tr></thead>'
+    header = ('<thead><tr><th>항목</th>'
+              + ''.join(f'<th>{"★" if "(E)" in y else ""}{y}</th>' for y in years)
+              + '</tr></thead>')
     body = '<tbody>'
-    for key in DISPLAY_ROWS:
+    for key, label in DISPLAY:
         if key not in rows:
             continue
         vals = rows[key]
-        cells = ''.join(f'<td>{v if v else "-"}</td>' for v in vals)
-        body += f'<tr><td>{key}</td>{cells}</tr>'
+        cells = ''
+        for i, v in enumerate(vals):
+            cls = ' class="cons-col"' if '(E)' in years[i] else ''
+            cells += f'<td{cls}>{v if v not in ("", "nan", "None") else "-"}</td>'
+        body += f'<tr><td>{label}</td>{cells}</tr>'
     body += '</tbody>'
 
     return f'<table class="financial-table">{header}{body}</table>'
 
-# --- 10. 메인 분석 함수 ---
+# ── 10. 메인 분석 함수 ─────────────────────────────────────────
 def analyze_stock(company_name):
     stock_code = get_stock_code(company_name)
     if not stock_code:
         return {"error": f"'{company_name}'(을)를 찾을 수 없습니다."}
 
     try:
-        # 네이버 증권 API로 재무 데이터 수집
         naver_data = get_naver_finance(stock_code)
         if naver_data is None:
             return {"error": "네이버 증권에서 재무 데이터를 가져오지 못했습니다."}
 
-        naver_data['stock_code'] = stock_code  # DCF에서 사용
-
-        # 현재주가
         current_price = get_current_price(stock_code)
-
-        # CAPM r 계산
         rf   = get_risk_free_rate()
         beta = get_beta_naver(stock_code)
-        erp  = 0.05
-        r_value = rf + beta * erp
-
-        # 재무 테이블 HTML
-        raw_table_html = build_raw_table_html(naver_data)
+        r_value = rf + beta * 0.05
 
         return {
             "name":          company_name,
             "code":          stock_code,
-            "raw_table":     raw_table_html,
+            "raw_table":     build_raw_table_html(naver_data),
             "current_price": f"{current_price:,.0f}" if current_price else "조회 실패",
             "r_info": {
                 "rf":   f"{rf*100:.2f}",
@@ -485,7 +540,7 @@ def analyze_stock(company_name):
         err_msg = str(e)
         if len(err_msg) > 200 or '<html' in err_msg.lower():
             err_msg = "데이터 수집 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
-        return {"error": f"서버 처리 중 오류 발생: {err_msg}"}
+        return {"error": f"서버 처리 중 오류: {err_msg}"}
 
 
 @app.route('/', methods=['GET', 'POST'])
