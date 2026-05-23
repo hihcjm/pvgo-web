@@ -618,14 +618,28 @@ def calc_rolling_dcf(naver_data, rf, current_price, stock_code=None, life_cycle=
         ebit_margin = (op_latest / rev_latest) if rev_latest > 0 else 0.1
         
         # 발행주식수
-        shares_k = 1000000
+        # 네이버 증권 '발행주식수' 행은 주(株) 단위 정수로 반환됨
+        # shares_T(T-shares) = 주수 / 1e12
+        shares_raw = None
         share_row = rows.get('발행주식수', [])
         for i in reversed(hist_idx):
             v = safe_float(share_row[i]) if i < len(share_row) else None
             if v and v > 1e6:
-                shares_k = v / 1000
+                shares_raw = v
                 break
-        shares_T = shares_k * 1000 / 1e12
+        # fallback: EPS 역산으로 주식수 추정
+        # 네이버 EPS 단위: 원(KRW), 당기순이익 단위: 억원
+        # 주식수(주) = 당기순이익(억원) × 1e8(원/억원) / EPS(원/주)
+        if shares_raw is None:
+            for i in reversed(hist_idx):
+                eps = get_val(rows, 'EPS', i)
+                net = get_val(rows, '당기순이익', i)
+                if eps and net and abs(eps) > 100:   # EPS 100원 이상만 유효
+                    shares_raw = abs(net) * 1e8 / abs(eps)
+                    if 1e7 < shares_raw < 1e11:      # 천만~1000억주 범위만 허용
+                        break
+                    shares_raw = None
+        shares_T = (shares_raw / 1e12) if shares_raw else (5e8 / 1e12)  # fallback 5억주
 
         # FnGuide 상세 파싱 (D&A, 비지배지분, 단기투자자산)
         st_invest_T = 0.0
