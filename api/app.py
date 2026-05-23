@@ -533,17 +533,31 @@ def analyze_stock(company_name):
         return {"error": f"'{company_name}'(을)를 찾을 수 없습니다."}
 
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'http://comp.fnguide.com/',
+            'Accept-Language': 'ko-KR,ko;q=0.9',
+        }
         url = (
             f"http://comp.fnguide.com/SVO2/ASP/SVD_Main.asp"
             f"?pGB=1&gicode=A{stock_code}&cID=&MenuYn=Y&ReportGB=&NewMenuID=11&stkGb=701"
         )
-        response = requests.get(url, headers=headers, timeout=15)
-        tables = pd.read_html(response.text)
+        response = requests.get(url, headers=headers, timeout=20)
+
+        # fnguide가 정상 응답인지 확인 (리다이렉트나 차단 감지)
+        if response.status_code != 200:
+            return {"error": f"fnguide 접속 실패 (상태코드: {response.status_code})"}
+        if 'SVD_Main' not in response.url and 'comp.fnguide' not in response.url:
+            return {"error": "fnguide에서 데이터를 가져오지 못했습니다. 잠시 후 다시 시도해주세요."}
+
+        try:
+            tables = pd.read_html(response.text)
+        except Exception:
+            return {"error": "fnguide 재무 테이블을 파싱할 수 없습니다. 잠시 후 다시 시도해주세요."}
 
         df = find_highlight_table(tables)
         if df is None:
-            return {"error": "재무 데이터 테이블을 찾을 수 없습니다."}
+            return {"error": "재무 데이터 테이블을 찾을 수 없습니다. 해당 종목의 데이터가 부족할 수 있습니다."}
 
         # 멀티레벨 헤더를 단일 레벨로 평탄화
         df.columns = [str(c[-1]) if isinstance(c, tuple) else str(c) for c in df.columns]
@@ -573,7 +587,11 @@ def analyze_stock(company_name):
         }
 
     except Exception as e:
-        return {"error": f"서버 처리 중 오류 발생: {e}"}
+        # 에러 메시지가 HTML이면 짧게 자름
+        err_msg = str(e)
+        if len(err_msg) > 200 or '<html' in err_msg.lower():
+            err_msg = "fnguide 데이터 수집 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+        return {"error": f"서버 처리 중 오류 발생: {err_msg}"}
 
 
 @app.route('/', methods=['GET', 'POST'])
