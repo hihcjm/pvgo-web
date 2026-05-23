@@ -734,46 +734,71 @@ def calc_rolling_dcf(naver_data, rf, current_price, stock_code=None, life_cycle=
         beta = get_beta_wisereport(stock_code)
         # 다모다란 ERP (Base 5% + CRP 2.5% for Korea)
         engine = DamodaranDCF(fin, rf=rf, erp=0.075, beta=beta)
-        
+
         # 생애주기에 따른 결과 산출
         res = engine.calculate_intrinsic_value(stage=life_cycle)
-        
-        # 기존 템플릿 호환성을 위한 브릿지 데이터
+
         import datetime
         current_year = datetime.date.today().year
         stage_names = {1: 'Start-up', 2: 'High-Growth', 3: 'Mature-Stable', 4: 'Declining'}
 
+        # ── PV(FCF) / PV(TV) 추출 ──────────────────────────────────
+        # fcff_schedule의 pv_fcf 합산 = PV(FCF) 총합
+        sched_raw   = res.get('fcff_schedule', [])
+        pv_fcfs_sum = sum(row.get('pv_fcf', 0) for row in sched_raw)
+        pv_tv_val   = res.get('pv_terminal_value') or res.get('pv_near') or 0.0
+        # pv_terminal_value: high_growth/startup/mature 모두 이 키로 저장
+        # (mature 2-stage는 pv_terminal_value, mature 1-stage도 동일)
+
+        # ── FCF 스케줄: 화면 표시용으로 정리 ──────────────────────
+        schedule = []
+        for row in sched_raw:
+            yr = row.get('year', '')
+            schedule.append({
+                'year':       yr,
+                'growth_g':   round(row['growth_g'] * 100, 1) if row.get('growth_g') is not None else None,
+                'roic':       round(row['roic']      * 100, 1) if row.get('roic')      is not None else None,
+                'reinv_rate': round(row.get('reinv_rate', 0) * 100, 1),
+                'nopat':      round(row['nopat'], 4)  if row.get('nopat') is not None else None,
+                'fcf':        round(row['fcf'],   4)  if row.get('fcf')   is not None else None,
+                'pv_fcf':     round(row['pv_fcf'], 4) if row.get('pv_fcf') is not None else None,
+                'phase':      row.get('phase') or row.get('note', ''),
+            })
+
         targets = [{
             'year': current_year,
             'target_price': f"{res['intrinsic_value']:,.0f}",
-            'upside_pct': round((res['intrinsic_value'] - current_price)/current_price*100, 1) if current_price else 0,
+            'upside_pct': round((res['intrinsic_value'] - current_price) / current_price * 100, 1) if current_price else 0,
             'stage': stage_names.get(life_cycle, 'High-Growth'),
             'horizon': 10,
             'proj_window': f'{current_year + 1}~{current_year + 10}',
-            'wacc_start_pct': round(res['wacc']*100, 1),
-            'wacc_end_pct': round(res['wacc']*100, 1),
-            'ev_T': round(res['ev'], 2),
-            'base_cash_T': round(fin.cash_st, 2),
-            'debt_T': round(fin.debt, 2),
-            'equity_T': round(res['equity_value'], 2),
-            'pv_fcfs_T': 0, # 생략 혹은 상세 계산 필요
-            'pv_tv_T': 0,
-            'survival_prob': 1.0
+            'wacc_start_pct': round(res['wacc'] * 100, 1),
+            'wacc_end_pct':   round(res['wacc'] * 100, 1),
+            'ev_T':           round(res['ev'],           2),
+            'base_cash_T':    round(res['cash_st'],      2),
+            'debt_T':         round(res['debt'],         2),
+            'equity_T':       round(res['equity_value'], 2),
+            'pv_fcfs_T':      round(pv_fcfs_sum,         2),
+            'pv_tv_T':        round(pv_tv_val,           2),
+            'survival_prob': 1.0,
         }]
 
         return {
-            'stage': stage_names.get(life_cycle, 'High-Growth'),
-            'horizon': 10,
-            'wacc_start': round(res['wacc']*100, 2),
-            'wacc_end': round(res['wacc']*100, 2),
-            'rf': round(rf*100, 2),
-            'terminal_g': round(rf*100, 2),
-            'industry_margin': round(ebit_margin*100, 1),
-            'tax_rate': round(tax_rate*100, 1),
-            'stc': 1.0,
-            'survival_prob': 1.0,
-            'targets': targets,
-            'schedule': [] 
+            'stage':           stage_names.get(life_cycle, 'High-Growth'),
+            'life_cycle':      life_cycle,
+            'horizon':         10,
+            'wacc_start':      round(res['wacc'] * 100, 2),
+            'wacc_end':        round(res['wacc'] * 100, 2),
+            'rf':              round(rf * 100, 2),
+            'terminal_g':      round(res.get('terminal_g', rf) * 100, 2),
+            'industry_margin': round(ebit_margin * 100, 1),
+            'tax_rate':        round(tax_rate * 100, 1),
+            'stc':             1.0,
+            'survival_prob':   1.0,
+            'roic_base':       round(res.get('roic_base', 0) * 100, 1) if res.get('roic_base') is not None else None,
+            'g_base':          round(res.get('g_base', 0)    * 100, 1) if res.get('g_base')    is not None else None,
+            'targets':         targets,
+            'schedule':        schedule,
         }
 
     except Exception:

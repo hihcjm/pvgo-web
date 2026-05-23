@@ -231,36 +231,44 @@
   @media (max-width:700px) { .band-grid { grid-template-columns: 1fr; } }
 
   /* ── Rolling DCF ── */
-  .rdcf-target-grid {
+  .rdcf-body {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 16px;
+    grid-template-columns: 260px 1fr;
+    gap: 0;
     padding: 16px 20px;
+    align-items: start;
   }
   .rdcf-target-card {
-    background: #f7fafc;
-    border: 1px solid #e2e8f0;
+    background: linear-gradient(160deg, #1a365d 0%, #2c5282 100%);
     border-radius: 10px;
-    padding: 16px;
+    padding: 20px 18px;
     text-align: center;
+    color: #fff;
+    position: sticky;
+    top: 16px;
   }
   .rdcf-target-card .yr-label {
-    font-size: 12px; font-weight: 700; color: #718096;
+    font-size: 11px; font-weight: 700; opacity: .75;
     text-transform: uppercase; letter-spacing: .5px;
   }
   .rdcf-target-card .tp {
-    font-size: 26px; font-weight: 900; color: #1a365d;
-    margin: 6px 0 4px;
+    font-size: 34px; font-weight: 900;
+    margin: 6px 0 4px; line-height: 1;
   }
-  .rdcf-target-card .upside-up   { color: #38a169; font-size: 14px; font-weight: 700; }
-  .rdcf-target-card .upside-down { color: #e53e3e; font-size: 14px; font-weight: 700; }
-  .rdcf-target-card .sub-rows    { font-size: 11px; color: #718096; margin-top: 8px; line-height: 1.8; }
+  .rdcf-target-card .upside-up   { color: #68d391; font-size: 14px; font-weight: 700; }
+  .rdcf-target-card .upside-down { color: #fc8181; font-size: 14px; font-weight: 700; }
+  .rdcf-target-card .sub-rows    { font-size: 11px; opacity: .8; margin-top: 12px; line-height: 1.9; }
   .rdcf-target-card .sub-rows span { display: block; }
+  .rdcf-target-card .sub-rows .sep {
+    border-top: 1px solid rgba(255,255,255,.2);
+    margin: 6px 0;
+    display: block;
+  }
   .rdcf-badge {
     display: inline-block; padding: 2px 8px; border-radius: 10px;
     font-size: 11px; font-weight: 700; margin-bottom: 6px;
   }
-  /* 7-Stage badge colors */
+  /* 4-Stage badge colors */
   .rdcf-mature-stable  { background:#ebf4ff; color:#2b6cb0; }
   .rdcf-mature-growth  { background:#e6fffa; color:#234e52; }
   .rdcf-high-growth    { background:#fed7d7; color:#9b2335; }
@@ -275,23 +283,33 @@
   }
   .wacc-decay strong { color:#2d3748; }
 
+  /* FCFF 스케줄 테이블 */
+  .rdcf-schedule-wrap { padding-left: 20px; overflow-x: auto; }
   .rdcf-schedule-table { width:100%; border-collapse:collapse; font-size:12px; }
   .rdcf-schedule-table th {
     background:#edf2f7; padding:6px 10px;
     text-align:right; font-weight:700; color:#4a5568;
     border-bottom:2px solid #e2e8f0; white-space:nowrap;
   }
-  .rdcf-schedule-table th:first-child { text-align:left; }
+  .rdcf-schedule-table th:first-child { text-align:center; }
   .rdcf-schedule-table td {
-    padding:5px 10px; border-bottom:1px solid #edf2f7;
+    padding:6px 10px; border-bottom:1px solid #edf2f7;
     text-align:right; white-space:nowrap;
   }
-  .rdcf-schedule-table td:first-child { text-align:left; font-weight:600; }
-  .rdcf-schedule-table tr.consensus-row td { background:#fffbeb; }
-  .rdcf-schedule-table tr.ext-row td      { background:#f7fafc; color:#718096; }
+  .rdcf-schedule-table td:first-child { text-align:center; font-weight:700; color:#2d3748; }
+  .rdcf-schedule-table tr.phase-high td   { background:#fff5f5; }
+  .rdcf-schedule-table tr.phase-trans td  { background:#fffbeb; }
+  .rdcf-schedule-table tr.phase-stable td { background:#f0fff4; }
+  .rdcf-schedule-table tr.phase-decline td{ background:#f5f5f4; color:#718096; }
+  .rdcf-schedule-table tr.phase-ramp td  { background:#faf5ff; }
   .rdcf-schedule-table tr:last-child td   { border-bottom:none; }
+  .rdcf-schedule-table .pv-col { color:#2b6cb0; font-weight:700; }
+  .rdcf-schedule-table .fcf-col { font-weight:700; }
 
-  @media (max-width:700px) { .rdcf-target-grid { grid-template-columns: 1fr; } }
+  @media (max-width:900px) {
+    .rdcf-body { grid-template-columns: 1fr; }
+    .rdcf-schedule-wrap { padding-left: 0; margin-top: 16px; }
+  }
 
   /* ── 에러 ── */
   .error-box {
@@ -589,173 +607,181 @@
   </div>
   {% endif %}
 
-  {# ── Rolling DCF (Damodaran 7-Stage Lifecycle) ── #}
+  {# ── Damodaran 4-Stage Life Cycle DCF ── #}
   {% if result.rdcf and not result.rdcf.error %}
   {% set rd = result.rdcf %}
-  {# 7-Stage 표시명 및 배지 색상 매핑 #}
   {% set stage_label_map = {
-    'Pre-Revenue':  '사전매출',
-    'Start-up':     '스타트업',
-    'High-Growth':  '고성장',
-    'Mature-Growth':'성숙성장',
-    'Mature-Stable':'성숙안정',
-    'Cyclical':     '경기순환',
-    'Declining':    '쇠퇴기'
+    'Start-up':     '① 신생·초기성장기',
+    'High-Growth':  '② 고성장기',
+    'Mature-Stable':'③ 성숙안정기',
+    'Declining':    '④ 쇠퇴기'
   } %}
   {% set stage_class_map = {
-    'Pre-Revenue':  'rdcf-pre-revenue',
     'Start-up':     'rdcf-start-up',
     'High-Growth':  'rdcf-high-growth',
-    'Mature-Growth':'rdcf-mature-growth',
     'Mature-Stable':'rdcf-mature-stable',
-    'Cyclical':     'rdcf-cyclical',
     'Declining':    'rdcf-declining'
   } %}
   {% set ft_label = stage_label_map.get(rd.stage, rd.stage) %}
   {% set ft_class = stage_class_map.get(rd.stage, 'rdcf-mature-stable') %}
+
   <div class="card">
-    <div class="card-header">🎯 롤링 DCF 적정주가 (Damodaran 7-Stage Lifecycle)
+    <div class="card-header">🎯 Damodaran 4-Stage Life Cycle DCF 적정주가
       <span style="font-size:11px;font-weight:400;color:#718096;margin-left:8px;">
-        FCF = NOPAT − 재투자 (Sales-to-Capital) · 단위: 조원
+        FCFF = NOPAT × (1 − RR) · 단위: 조원
       </span>
     </div>
 
-    {# ── 파라미터 요약 배지 ── #}
-    <div style="padding:12px 20px 0; display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
-      <span class="rdcf-badge {{ ft_class }}">
-        {{ ft_label }} &nbsp;·&nbsp; {{ rd.horizon }}년 호라이즌
-      </span>
-      {% if rd.survival_prob < 1.0 %}
-      <span class="rdcf-badge" style="background:#fed7d7;color:#9b2335;">
-        생존확률 {{ (rd.survival_prob * 100)|int }}%
-      </span>
-      {% endif %}
+    {# ── 상단 파라미터 배지 바 ── #}
+    <div style="padding:10px 20px 0; display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+      <span class="rdcf-badge {{ ft_class }}">{{ ft_label }}</span>
       <span class="wacc-decay">
-        WACC
-        {% if rd.wacc_start != rd.wacc_end %}
-          <strong>{{ rd.wacc_start }}%</strong>
-          <span style="color:#a0aec0;">→</span>
-          <strong>{{ rd.wacc_end }}%</strong>
-          <span style="font-size:11px;color:#a0aec0;">({{ rd.horizon }}년 선형감소)</span>
-        {% else %}
-          <strong>{{ rd.wacc_start }}%</strong>
-          <span style="font-size:11px;color:#a0aec0;">(고정)</span>
-        {% endif %}
+        WACC <strong>{{ rd.wacc_start }}%</strong>
         &nbsp;·&nbsp; rf <strong>{{ rd.rf }}%</strong>
-        &nbsp;·&nbsp; 영구성장률 <strong>{{ rd.terminal_g }}%</strong>
-        &nbsp;·&nbsp; EBIT 마진수렴 <strong>{{ rd.industry_margin }}%</strong>
+        &nbsp;·&nbsp; ERP <strong>7.5%</strong>
+        &nbsp;·&nbsp; g_terminal <strong>{{ rd.terminal_g }}%</strong>
         &nbsp;·&nbsp; 법인세 <strong>{{ rd.tax_rate }}%</strong>
+        {% if rd.roic_base is not none %}
+        &nbsp;·&nbsp; 기초 ROIC <strong>{{ rd.roic_base }}%</strong>
+        {% endif %}
+        {% if rd.g_base is not none %}
+        &nbsp;·&nbsp; 내재성장률 <strong>{{ rd.g_base }}%</strong>
+        {% endif %}
       </span>
     </div>
 
-    {# ── 연도별 목표주가 3개 카드 ── #}
-    <div class="rdcf-target-grid">
+    {# ── 목표주가 카드 + FCF 스케줄 테이블 좌우 배치 ── #}
+    <div class="rdcf-body">
+
+      {# ── 왼쪽: 목표주가 카드 ── #}
       {% for t in rd.targets %}
       <div class="rdcf-target-card">
-        <div class="yr-label">{{ t.year }}년말 목표주가</div>
+        <div class="yr-label">{{ t.year }}년말 DCF 적정주가</div>
         <div class="tp">{{ t.target_price }}원</div>
         {% if t.upside_pct is not none %}
         <div class="{% if t.upside_pct >= 0 %}upside-up{% else %}upside-down{% endif %}">
-          {% if t.upside_pct >= 0 %}▲{% else %}▼{% endif %}
-          {{ t.upside_pct | abs }}% 현재가 대비
+          {% if t.upside_pct >= 0 %}▲ +{{ t.upside_pct }}%{% else %}▼ {{ t.upside_pct }}%{% endif %}
+          &nbsp;<span style="font-size:10px;opacity:.8;">현재가 대비</span>
         </div>
         {% endif %}
+
         <div class="sub-rows">
           <span>
-            <span class="rdcf-badge {{ stage_class_map.get(t.stage, 'rdcf-mature-stable') }}" style="margin-bottom:0;font-size:10px;">
+            <span class="rdcf-badge {{ stage_class_map.get(t.stage, 'rdcf-mature-stable') }}"
+                  style="margin-bottom:0;font-size:10px;">
               {{ stage_label_map.get(t.stage, t.stage) }}
             </span>
           </span>
           <span>프로젝션 {{ t.proj_window }} ({{ t.horizon }}년)</span>
-          {% if t.wacc_start_pct != t.wacc_end_pct %}
-          <span>WACC {{ t.wacc_start_pct }}%→{{ t.wacc_end_pct }}%</span>
-          {% else %}
           <span>WACC {{ t.wacc_start_pct }}% (고정)</span>
-          {% endif %}
-          {% if t.survival_prob < 1.0 %}
-          <span style="color:#e53e3e;">생존확률 {{ (t.survival_prob*100)|int }}% 반영</span>
-          {% endif %}
-          <span>EV  {{ t.ev_T }}조원</span>
-          <span>현금 {{ t.base_cash_T }}조 · 부채 {{ t.debt_T }}조</span>
-          <span>내재가치 {{ t.equity_T }}조원</span>
-          <span style="padding-top:4px;border-top:1px solid #e2e8f0;margin-top:4px;">
-            PV(FCF) {{ t.pv_fcfs_T }}조 + PV(TV) {{ t.pv_tv_T }}조
-          </span>
+
+          <span class="sep"></span>
+
+          <span>EV &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {{ t.ev_T }}조원</span>
+          <span>+ 현금 &nbsp;&nbsp; {{ t.base_cash_T }}조원</span>
+          <span>− 부채 &nbsp;&nbsp; {{ t.debt_T }}조원</span>
+          <span>= 내재가치 {{ t.equity_T }}조원</span>
+
+          <span class="sep"></span>
+
+          <span>PV(FCF) {{ t.pv_fcfs_T }}조</span>
+          <span>PV(TV) &nbsp;{{ t.pv_tv_T }}조</span>
         </div>
       </div>
       {% endfor %}
-    </div>
 
-    {# ── FCF 전체 스케줄 ── #}
-    {% if rd.schedule %}
-    <div style="padding:4px 20px 0;">
-      <div style="font-size:12px;font-weight:700;color:#4a5568;margin-bottom:6px;">
-        FCF 스케줄 (조원) &nbsp;
-        <span style="font-weight:400;color:#a0aec0;">
-          <span style="background:#fffbeb;padding:1px 5px;border-radius:3px;">컨센서스</span>
+      {# ── 오른쪽: FCFF 연도별 스케줄 테이블 ── #}
+      {% if rd.schedule %}
+      <div class="rdcf-schedule-wrap">
+        <div style="font-size:11px;color:#a0aec0;margin-bottom:6px;">
+          <span style="background:#fff5f5;padding:1px 6px;border-radius:3px;color:#9b2335;font-weight:700;">고성장</span>
           &nbsp;
-          <span style="background:#f7fafc;padding:1px 5px;border-radius:3px;color:#718096;">외삽</span>
-        </span>
-      </div>
-      <div style="overflow-x:auto;">
+          <span style="background:#fffbeb;padding:1px 6px;border-radius:3px;color:#b7791f;font-weight:700;">전환</span>
+          &nbsp;
+          <span style="background:#f0fff4;padding:1px 6px;border-radius:3px;color:#276749;font-weight:700;">안정</span>
+          &nbsp;
+          <span style="background:#faf5ff;padding:1px 6px;border-radius:3px;color:#553c9a;font-weight:700;">램프업</span>
+          &nbsp;&nbsp; 단위: 조원
+        </div>
         <table class="rdcf-schedule-table">
           <thead>
             <tr>
-              <th style="text-align:left;">연도</th>
-              <th>매출 (조원)</th>
-              <th>매출성장</th>
-              <th>EBIT 마진</th>
+              <th>연도</th>
+              {% if rd.schedule[0].growth_g is not none %}
+              <th>성장률 g</th>
+              {% endif %}
+              {% if rd.schedule[0].roic is not none %}
+              <th>ROIC</th>
+              {% endif %}
+              <th>재투자율 RR</th>
               <th>NOPAT</th>
-              <th>재투자</th>
-              <th>FCF</th>
-              <th>WACC</th>
-              <th>구분</th>
+              <th class="fcf-col">FCFF</th>
+              <th class="pv-col">PV(FCFF)</th>
+              <th>단계</th>
             </tr>
           </thead>
           <tbody>
           {% for s in rd.schedule %}
-          <tr class="{% if s.source == 'consensus' %}consensus-row{% else %}ext-row{% endif %}">
+          {% if s.phase in ('high_growth',) %}{% set row_cls = 'phase-high'
+          %}{% elif s.phase == 'transition' %}{% set row_cls = 'phase-trans'
+          %}{% elif s.phase in ('near_stable', 'gordon_growth') %}{% set row_cls = 'phase-stable'
+          %}{% elif s.phase == 'decline' %}{% set row_cls = 'phase-decline'
+          %}{% elif s.phase == 'ramp' %}{% set row_cls = 'phase-ramp'
+          %}{% else %}{% set row_cls = ''
+          %}{% endif %}
+          <tr class="{{ row_cls }}">
             <td>{{ s.year }}</td>
-            <td>{{ s.revenue }}</td>
-            <td>{% if s.rev_growth is not none %}{{ s.rev_growth }}%{% else %}—{% endif %}</td>
-            <td>{{ s.ebit_margin }}%</td>
-            <td>{{ s.nopat }}</td>
-            <td>{{ s.reinvestment }}</td>
-            <td style="font-weight:{% if s.source=='consensus' %}700{% else %}400{% endif %};">
-              {{ s.fcf }}
-            </td>
-            <td>{% if s.wacc is not none %}{{ s.wacc }}%{% else %}—{% endif %}</td>
+            {% if rd.schedule[0].growth_g is not none %}
+            <td>{% if s.growth_g is not none %}{{ s.growth_g }}%{% else %}—{% endif %}</td>
+            {% endif %}
+            {% if rd.schedule[0].roic is not none %}
+            <td>{% if s.roic is not none %}{{ s.roic }}%{% else %}—{% endif %}</td>
+            {% endif %}
+            <td>{% if s.reinv_rate is not none %}{{ s.reinv_rate }}%{% else %}—{% endif %}</td>
+            <td>{% if s.nopat is not none %}{{ "%.4f"|format(s.nopat) }}{% else %}—{% endif %}</td>
+            <td class="fcf-col">{% if s.fcf is not none %}{{ "%.4f"|format(s.fcf) }}{% else %}—{% endif %}</td>
+            <td class="pv-col">{% if s.pv_fcf is not none %}{{ "%.4f"|format(s.pv_fcf) }}{% else %}—{% endif %}</td>
             <td style="font-size:10px;">
-              {% if s.source == 'consensus' %}
-              <span style="color:#b7791f;">컨센서스</span>
-              {% else %}
-              <span style="color:#a0aec0;">외삽</span>
+              {% if s.phase == 'high_growth' %}<span style="color:#9b2335;">고성장</span>
+              {% elif s.phase == 'transition' %}<span style="color:#b7791f;">전환</span>
+              {% elif s.phase in ('near_stable','gordon_growth') %}<span style="color:#276749;">안정</span>
+              {% elif s.phase == 'ramp' %}<span style="color:#553c9a;">램프업</span>
+              {% elif s.phase == 'decline' %}<span style="color:#718096;">쇠퇴</span>
+              {% else %}<span style="color:#a0aec0;">{{ s.phase }}</span>
               {% endif %}
             </td>
           </tr>
           {% endfor %}
+          {# 합계 행 #}
+          {% set total_fcf  = rd.targets[0].pv_fcfs_T %}
+          {% set total_tv   = rd.targets[0].pv_tv_T %}
+          <tr style="background:#ebf4ff;font-weight:700;border-top:2px solid #bee3f8;">
+            <td colspan="{% if rd.schedule[0].roic is not none %}3{% elif rd.schedule[0].growth_g is not none %}2{% else %}1{% endif %}" style="text-align:right;color:#2b6cb0;">합계</td>
+            <td></td>
+            <td></td>
+            <td class="fcf-col" style="color:#2b6cb0;">PV(FCF): {{ total_fcf }}조</td>
+            <td class="pv-col" style="color:#2b6cb0;">PV(TV): {{ total_tv }}조</td>
+            <td></td>
+          </tr>
           </tbody>
         </table>
       </div>
-    </div>
-    {% endif %}
+      {% endif %}
 
-    <p style="padding:10px 20px 14px;color:#a0aec0;font-size:11px;">
-      Damodaran Rolling DCF v4 7-Stage Lifecycle ({{ ft_label }}) —
-      재투자 = ΔRev ÷ S/Capital({{ rd.stc }}) ·
-      성장률 → rf({{ rd.terminal_g }}%) 수렴 ·
-      EBIT 마진 → {{ rd.industry_margin }}% 수렴 ·
-      TV = FCF<sub>n+1</sub> ÷ (WACC<sub>terminal</sub> − rf)
-      {% if rd.survival_prob < 1.0 %} · EV × 생존확률 {{ (rd.survival_prob*100)|int }}% 반영{% endif %}
-      {% if rd.stage == 'Cyclical' %} · 마진 즉시 역사적 평균 수렴 · 재투자 한도 15% of Rev 적용{% endif %}
-      {% if rd.stage == 'Pre-Revenue' %} · WACC 25%→8% 대폭 감소 · 생존확률 20% 적용{% endif %}
-      {% if rd.stage == 'Start-up' %} · WACC 18%→8% 감소 · 생존확률 60% 적용{% endif %}
+    </div>{# /rdcf-body #}
+
+    <p style="padding:6px 20px 14px;color:#a0aec0;font-size:11px;">
+      Damodaran 4-Stage Life Cycle DCF ({{ ft_label }}) —
+      ROIC×RR = 내재성장률 · ROIC → WACC 선형 수렴(t=6~10) ·
+      g_terminal = min(g_base, rf) · IC = max(D&A×5, Rev×0.5) ·
+      EV → Equity: EV + 현금 − 부채 − 비지배지분
     </p>
   </div>
+
   {% elif result.rdcf and result.rdcf.error %}
   <div class="card">
-    <div class="card-header">🎯 롤링 DCF 적정주가 (Damodaran 7-Stage)</div>
-    <p style="padding:14px 20px;color:#e53e3e;font-size:13px;white-space:pre-wrap;">{{ result.rdcf.error[:500] }}</p>
+    <div class="card-header">🎯 Damodaran 4-Stage Life Cycle DCF</div>
+    <p style="padding:14px 20px;color:#e53e3e;font-size:13px;white-space:pre-wrap;font-family:monospace;">{{ result.rdcf.error[:600] }}</p>
   </div>
   {% endif %}
 
