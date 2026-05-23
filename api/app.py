@@ -301,36 +301,38 @@ def get_risk_free_rate():
         pass
     return 0.044
 
-# ── 6. 베타 (soup 재사용) ────────────────────────────────────
-def get_beta_from_soup(soup):
-    """get_naver_finance()의 soup을 재사용해 베타 추출."""
+# ── 6. 베타 (wisereport 52주베타) ───────────────────────────────
+def get_beta_wisereport(stock_code):
+    """
+    navercomp.wisereport.co.kr c1010001 페이지의 '52주베타' 값을 가져옴.
+    실패 시 1.0 반환.
+    """
     try:
-        if soup is None:
-            return 1.0
-        # 업종비교 테이블에서 '베타' 행 찾기
-        for table in soup.find_all('table'):
-            for tr in table.find_all('tr'):
-                th = tr.find('th')
-                if th and '베타' in th.get_text():
-                    tds = tr.find_all('td')
-                    for td in tds:
-                        m = re.search(r'\d+\.\d+', td.get_text())
-                        if m:
-                            b = float(m.group())
-                            if 0.1 < b < 5.0:
-                                return b
-        # tbody[3](업종비교)에서 텍스트 검색
-        tbodies = soup.find_all('tbody')
-        for tb in tbodies:
-            text = tb.get_text()
-            if '베타' in text:
-                m = re.search(r'베타[^\d]*(\d+\.\d+)', text)
-                if m:
-                    b = float(m.group(1))
-                    if 0.1 < b < 5.0:
-                        return b
+        url = f'https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd={stock_code}'
+        resp = requests.get(
+            url,
+            headers={**NAVER_HEADERS, 'Referer': 'https://navercomp.wisereport.co.kr'},
+            timeout=15
+        )
+        resp.encoding = 'utf-8'
+        soup_wr = BeautifulSoup(resp.text, 'html.parser')
+        # <th>52주베타</th><td class="num">1.23</td> 구조
+        for tr in soup_wr.find_all('tr'):
+            th = tr.find('th')
+            if th and '52주베타' in th.get_text():
+                td = tr.find('td')
+                if td:
+                    m = re.search(r'\d+\.\d+', td.get_text())
+                    if m:
+                        b = float(m.group())
+                        if 0.1 < b < 5.0:
+                            return b
     except:
         pass
+    return 1.0
+
+def get_beta_from_soup(soup):
+    """레거시 호환용 — wisereport로 대체됨."""
     return 1.0
 
 # ── 7. 밴드 분석 ───────────────────────────────────────────────
@@ -671,7 +673,7 @@ def analyze_stock(company_name):
 
         current_price = get_current_price(stock_code)
         rf   = get_risk_free_rate()
-        beta = get_beta_from_soup(soup)
+        beta = get_beta_wisereport(stock_code)
         r_value = rf + beta * 0.05
 
         # 증권사 목표가
