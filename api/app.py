@@ -5,6 +5,7 @@ import FinanceDataReader as fdr
 import re
 import math
 import os
+import io
 
 template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'templates')
 app = Flask(__name__, template_folder=template_dir)
@@ -65,8 +66,9 @@ def get_naver_finance(stock_code):
     if resp.status_code != 200:
         return None
 
-    # euc-kr 디코딩
-    tables = pd.read_html(resp.content, encoding='euc-kr', flavor='lxml')
+    # euc-kr 디코딩 후 StringIO로 감싸서 전달 (lxml은 bytes를 파일 경로로 오해함)
+    html_text = resp.content.decode('euc-kr')
+    tables = pd.read_html(io.StringIO(html_text))
 
     # 재무 테이블 찾기: 컬럼이 튜플이고 '매출액' 행이 있는 테이블
     fin_table = None
@@ -201,7 +203,8 @@ def get_beta_naver(stock_code):
     try:
         url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
         resp = requests.get(url, headers=NAVER_HEADERS, timeout=15)
-        tables = pd.read_html(resp.content, encoding='euc-kr')
+        html_text = resp.content.decode('euc-kr')
+        tables = pd.read_html(io.StringIO(html_text))
         for t in tables:
             for col in t.columns:
                 for i, v in enumerate(t[col].astype(str)):
