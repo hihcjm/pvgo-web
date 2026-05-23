@@ -531,21 +531,48 @@ def calc_valuation_band(naver_data, current_price):
 
     # ── PEG ──
     def calc_peg(per_val, eps_idx):
-        if per_val is None or per_val <= 0: return None
+        """
+        PEG = PER / (EPS CAGR × 100)
+
+        CAGR 계산 규칙:
+        - 기준 연도(eps_idx) EPS가 양수여야 함
+        - 시작 연도(es) EPS도 양수여야 함
+        - 시작~기준 구간 사이에 음수 EPS가 단 1개라도 있으면 해당 구간 제외
+          → 연속된 양수 구간만 CAGR 계산에 사용 (가장 먼 유효 구간 우선)
+        """
+        if per_val is None or per_val <= 0:
+            return None
         ee = safe_float(eps_row[eps_idx]) if eps_idx is not None and eps_idx < len(eps_row) else None
-        if not ee or ee <= 0: return None
-        for s in range(max(0, eps_idx-5), eps_idx):
+        if not ee or ee <= 0:
+            return None
+
+        # 가장 먼 시작점부터 탐색 (더 긴 CAGR 기간 우선)
+        for s in range(max(0, eps_idx - 5), eps_idx):
             es = safe_float(eps_row[s]) if s < len(eps_row) else None
-            n  = eps_idx - s
-            if es and es > 0 and n > 0:
-                cagr = (ee/es)**(1/n) - 1
-                if cagr > 0:
-                    return round(per_val / (cagr*100), 2)
+            if not es or es <= 0:
+                continue  # 시작 연도 EPS 음수 → 스킵
+
+            # 시작~기준 구간 내 모든 EPS가 양수인지 검사
+            all_positive = all(
+                (safe_float(eps_row[k]) or 0) > 0
+                for k in range(s, eps_idx + 1)
+                if k < len(eps_row)
+            )
+            if not all_positive:
+                continue  # 구간 내 음수 EPS 존재 → 이 구간 제외
+
+            n = eps_idx - s
+            if n <= 0:
+                continue
+            cagr = (ee / es) ** (1 / n) - 1
+            if cagr > 0:
+                return round(per_val / (cagr * 100), 2)
+
         return None
 
-    hist_peg = [calc_peg(get_val(rows,'PER',i), i) for i in hist_idx]
+    hist_peg = [calc_peg(get_val(rows, 'PER', i), i) for i in hist_idx]
     hist_peg = [v for v in hist_peg if v is not None and v > 0]
-    peg_cur  = calc_peg(per_cur, idx_25) if idx_25 is not None else None
+    peg_cur  = calc_peg(per_cur, idx_25)  if idx_25  is not None else None
     peg_est  = calc_peg(per_est, idx_26e) if idx_26e is not None else None
     results.append(make_band("PEG", hist_peg, peg_cur, peg_est, no_theory=True))
 
