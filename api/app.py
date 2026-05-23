@@ -698,15 +698,17 @@ def calc_rolling_dcf(naver_data, rf, current_price, stock_code=None, life_cycle=
         res = engine.calculate_intrinsic_value(stage=life_cycle)
         
         # 기존 템플릿 호환성을 위한 브릿지 데이터
+        import datetime
+        current_year = datetime.date.today().year
         stage_names = {1: 'Start-up', 2: 'High-Growth', 3: 'Mature-Stable', 4: 'Declining'}
-        
+
         targets = [{
-            'year': 2025, # 현재 시점 기준
+            'year': current_year,
             'target_price': f"{res['intrinsic_value']:,.0f}",
             'upside_pct': round((res['intrinsic_value'] - current_price)/current_price*100, 1) if current_price else 0,
             'stage': stage_names.get(life_cycle, 'High-Growth'),
             'horizon': 10,
-            'proj_window': '2026~2035',
+            'proj_window': f'{current_year + 1}~{current_year + 10}',
             'wacc_start_pct': round(res['wacc']*100, 1),
             'wacc_end_pct': round(res['wacc']*100, 1),
             'ev_T': round(res['ev'], 2),
