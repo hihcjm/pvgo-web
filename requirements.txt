@@ -1,6 +1,6 @@
 flask
 pandas
 requests
-FinanceDataReader
+finance-datareader
 lxml
 gunicorn
