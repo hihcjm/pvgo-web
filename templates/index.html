@@ -136,6 +136,33 @@
             {% if result.dcf.error %}
                 <p style="padding:16px;color:red;">{{ result.dcf.error }}</p>
             {% else %}
+
+            {# 과거 FCF 참고값 #}
+            {% if result.dcf.hist_fcf %}
+            <div style="padding:12px 24px 4px; font-size:12px; color:#555;">
+                <strong>과거 FCF 참고값</strong> (마진 평균 산출 기준)
+                &nbsp;|&nbsp; 발행주식수: <strong>{{ result.dcf.shares }}백만주</strong>
+                <table style="margin-top:6px; border-collapse:collapse; font-size:12px;">
+                    <thead><tr style="background:#f0f4f8;">
+                        <th style="padding:4px 12px; border:1px solid #ddd;">연도</th>
+                        <th style="padding:4px 12px; border:1px solid #ddd; text-align:right;">FCFF (억원)</th>
+                        <th style="padding:4px 12px; border:1px solid #ddd; text-align:right;">FCF 마진</th>
+                        <th style="padding:4px 12px; border:1px solid #ddd; text-align:center;">출처</th>
+                    </tr></thead>
+                    <tbody>
+                    {% for h in result.dcf.hist_fcf %}
+                    <tr>
+                        <td style="padding:3px 12px; border:1px solid #eee;">{{ h.year }}</td>
+                        <td style="padding:3px 12px; border:1px solid #eee; text-align:right;">{{ "{:,}".format(h.fcf) }}</td>
+                        <td style="padding:3px 12px; border:1px solid #eee; text-align:right;">{{ h.margin }}%</td>
+                        <td style="padding:3px 12px; border:1px solid #eee; text-align:center; color:#888;">{{ h.src }}</td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% endif %}
+
             <table class="val-table">
                 <thead>
                     <tr>

@@ -472,7 +472,7 @@ def calc_valuation_band(naver_data, current_price):
     return results
 
 # ── 8. DCF (FCF 직접 사용 + 컨센서스 26~28E) ─────────────────
-def calc_dcf(naver_data, r, current_price, g_terminal=0.025):
+def calc_dcf(naver_data, r, current_price, g_terminal=0.025, stock_code=None):
     """
     네이버 Financial Summary의 FCF를 직접 사용.
     과거 FCF/매출액 마진 평균 → 컨센서스 매출액에 적용해 26~28E FCFF 추정.
@@ -493,22 +493,28 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025):
 
         # ── 과거 FCF 마진 계산 (FCF가 있으면 직접, 없으면 영업이익 기반) ──
         hist_fcff_margin = []
+        hist_fcf_detail  = []   # 화면 표시용: [(year, fcf_억, margin_%)]
         for i in hist_idx:
             rev = get_val(rows, '매출액', i)
             fcf = safe_float(fcf_row[i]) if i < len(fcf_row) else None
             if rev and rev > 0 and fcf is not None:
-                hist_fcff_margin.append(fcf / rev)
+                margin = fcf / rev
+                hist_fcff_margin.append(margin)
+                hist_fcf_detail.append({'year': years[i], 'fcf': round(fcf), 'margin': round(margin*100,1), 'src': '직접'})
 
         # FCF 데이터 부족시 영업이익 기반으로 대체
         if len(hist_fcff_margin) < 2:
             TAX = 0.22; DA = 0.05; CAPEX_R = 0.06
             hist_fcff_margin = []
+            hist_fcf_detail  = []
             for i in hist_idx:
                 rev = get_val(rows,'매출액',i)
                 op  = get_val(rows,'영업이익(발표)',i) or get_val(rows,'영업이익',i)
                 if rev and op and rev > 0 and op > 0:
                     fcff = op*(1-TAX) + rev*DA - rev*CAPEX_R
-                    hist_fcff_margin.append(fcff / rev)
+                    margin = fcff / rev
+                    hist_fcff_margin.append(margin)
+                    hist_fcf_detail.append({'year': years[i], 'fcf': round(fcff), 'margin': round(margin*100,1), 'src': '영업이익추정'})
 
         if len(hist_fcff_margin) < 2:
             return {"error": "과거 FCF 데이터 부족"}
@@ -519,7 +525,11 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025):
         rev_hist = [get_val(rows, '매출액', i) for i in hist_idx]
         rev_hist = [v for v in rev_hist if v and v > 0]
         if len(rev_hist) >= 2:
-            rev_growth = (rev_hist[-1] / rev_hist[0]) ** (1 / (len(rev_hist) - 1)) - 1
+            cagr = (rev_hist[-1] / rev_hist[0]) ** (1 / (len(rev_hist) - 1)) - 1
+            # 마지막 1년 성장률
+            last_g = rev_hist[-1] / rev_hist[-2] - 1
+            # 비정상 고성장(사이클) 완화: CAGR과 마지막 성장률의 평균, 상한 20%
+            rev_growth = min((cagr + last_g) / 2, 0.20)
         else:
             rev_growth = 0.05  # fallback 5%
 
@@ -563,16 +573,44 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025):
         if r <= g_terminal:
             return {"error": f"할인율({r*100:.1f}%)이 터미널성장률({g_terminal*100:.1f}%)보다 낮음"}
 
-        # ── 발행주식수 (주 단위 → 천주 변환) ──
+        # ── 발행주식수 취득 (우선순위: 네이버 테이블 → EPS/순이익 역산 → KRX) ──
         shares_k = None
+
+        # ① 네이버 테이블 '발행주식수' 행 (단위: 주)
         share_row = rows.get('발행주식수', [])
         for i in reversed(hist_idx):
             v = safe_float(share_row[i]) if i < len(share_row) else None
             if v and v > 1e6:
-                shares_k = v / 1000
+                shares_k = v / 1000   # 주 → 천주
                 break
+
+        # ② EPS / 당기순이익 역산 (흑자 연도 우선)
+        #    주식수(주) = 순이익(억원) × 1e8 / EPS(원/주)
         if not shares_k:
-            shares_k = 5919638
+            for i in reversed(hist_idx):
+                eps = get_val(rows, 'EPS', i)
+                net = get_val(rows, '당기순이익', i)
+                if eps and net and abs(eps) > 100 and net > 0:
+                    shares_k = (net * 1e8 / abs(eps)) / 1000  # 주 → 천주
+                    break
+
+        # ③ FinanceDataReader KRX 상장주식수
+        if not shares_k and stock_code:
+            try:
+                df_krx = fdr.StockListing('KRX')
+                row_krx = df_krx[df_krx['Code'] == stock_code]
+                if not row_krx.empty:
+                    for col in ['Shares', 'ListingShares']:
+                        if col in row_krx.columns:
+                            v = float(row_krx.iloc[0][col])
+                            if v > 1e6:
+                                shares_k = v / 1000
+                                break
+            except:
+                pass
+
+        if not shares_k:
+            shares_k = 1000000  # 1억주 중립 fallback
 
         def pv_to_price(pv_total):
             return pv_total * 1e8 / (shares_k * 1e3)
@@ -607,6 +645,8 @@ def calc_dcf(naver_data, r, current_price, g_terminal=0.025):
             "g_terminal":      round(g_terminal*100, 1),
             "r":               round(r*100, 2),
             "rev_growth":      round(rev_growth*100, 1),
+            "shares":          round(shares_k * 1000 / 1e6, 1),  # 백만주 단위
+            "hist_fcf":        hist_fcf_detail,   # 과거 FCF 상세
             "pv_fcfs":         pv_fcfs,
         }
     except Exception as e:
@@ -689,7 +729,7 @@ def analyze_stock(company_name):
                 "beta": f"{beta:.2f}",
                 "r":    f"{r_value*100:.2f}",
             },
-            "dcf":   calc_dcf(naver_data, r_value, current_price),
+            "dcf":   calc_dcf(naver_data, r_value, current_price, stock_code=stock_code),
             "band":  calc_valuation_band(naver_data, current_price),
             "tp":    tp_data,
         }
