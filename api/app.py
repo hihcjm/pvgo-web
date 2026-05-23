@@ -724,18 +724,57 @@ def calc_rolling_dcf(naver_data, rf, current_price, stock_code=None):
         else:
             debt_T = 0.0
 
+        # ── FnGuide 상세 파싱 (D&A, 비지배지분, 단기투자자산) ─────────
+        st_invest_T = 0.0
+        minority_T  = 0.0
+        depr_amort_T = 0.0
+        
+        try:
+            # FnGuide URL (재무상태표, 현금흐름표 등)
+            fg_url = f"https://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp?pGB=1&gicode=A{stock_code}"
+            fg_resp = requests.get(fg_url, headers=NAVER_HEADERS, timeout=15)
+            fg_resp.encoding = 'utf-8'
+            fg_tables = pd.read_html(fg_resp.text)
+            
+            # 테이블 인덱스 추정 (0:IS, 2:BS, 4:CF)
+            is_df_fg = fg_tables[0]
+            bs_df_fg = fg_tables[2]
+            cf_df_fg = fg_tables[4]
+            
+            def get_fg_val(df, row_name):
+                row = df[df.iloc[:, 0].str.contains(row_name, na=False)]
+                if not row.empty:
+                    # 최신 연도 컬럼 (보통 끝에서 2번째 또는 1번째)
+                    v = row.iloc[:, -2].values[0] # 최근 연도 실적
+                    return safe_float(v)
+                return 0.0
+
+            st_invest_T  = to_T(get_fg_val(bs_df_fg, '단기금융상품') + get_fg_val(bs_df_fg, '단기투자자산')) or 0.0
+            minority_T   = to_T(get_fg_val(bs_df_fg, '비지배지분')) or 0.0
+            depr_amort_T = to_T(get_fg_val(cf_df_fg, '감가상각비') + get_fg_val(cf_df_fg, '무형자산상각비')) or 0.0
+        except:
+            pass
+
         # ── Financials ──────────────────────────────────────────────
         actuals = Financials(
             revenue           = rev_latest,
             ebit_margin       = ebit_margin,
             revenue_growth    = rev_growth_act,
             cash              = cash_T,
+            st_investments    = st_invest_T,
             debt              = debt_T,
+            minority_interest = minority_T,
             shares            = shares_T,
+            depr_amort        = depr_amort_T,
             hist_ebit_margins = hist_ebit_margins,
             hist_rev_growth   = hist_rev_growth,
         )
 
+        # ── rf 및 ERP (CRP 2.5% 반영) ────────────────────────────────
+        # 다모다란 전략: Base ERP(5%) + Korea CRP(2.5%) = 7.5%
+        # r = rf + beta * ERP_total
+        erp_total = 0.075
+        
         # ── Industry margin 추정 ─────────────────────────────────────
         if ebit_margin <= 0:
             industry_margin = 0.10
@@ -956,7 +995,10 @@ def analyze_stock(company_name):
         current_price = get_current_price(stock_code)
         rf           = get_risk_free_rate()
         beta         = get_beta_wisereport(stock_code)
-        r_value      = rf + beta * 0.05
+        
+        # 다모다란 인재가치 평가 전략: Base ERP(5%) + Korea CRP(2.5%) = 7.5%
+        erp_korea = 0.075
+        r_value   = rf + beta * erp_korea
 
         # 증권사 목표가
         tp_data = get_target_prices(stock_code, naver_soup=soup)

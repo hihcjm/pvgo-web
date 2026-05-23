@@ -58,8 +58,12 @@ class Financials:
     ebit_margin:          float          # fraction (negative OK)
     revenue_growth:       float          # TTM YoY fraction
     cash:                 float          # $B or T-won
+    st_investments:       float          = 0.0  # short-term investments
     debt:                 float          # $B or T-won
+    minority_interest:    float          = 0.0  # minority interest (subtract from EV)
     shares:               float          # B-shares or T-shares
+    depr_amort:           float          = 0.0  # D&A for FCF calculation
+    capex:                float          = 0.0  # CapEx for Reinvestment Rate
     hist_ebit_margins:    list[float]    = field(default_factory=list)  # last <=10Y
     hist_rev_growth:      list[float]    = field(default_factory=list)  # last <=5Y
 
@@ -522,9 +526,16 @@ class RollingDCFEngine:
                 fcf_tv = float(all_df.loc[tv_year, "fcf"])
             else:
                 fcf_tv = float(all_df.iloc[-1]["fcf"])
+            
+            tv_wacc = cfg.wacc_end
+            
+            # 다모다란 철학: 영구성장기에는 ROIC = WACC로 수렴 (초과이익 소멸)
+            # 즉, 재투자율 = g / ROIC (여기서 ROIC = WACC 가정)
+            # fcf_tv_adj = NOPAT_n+1 * (1 - g/WACC)
+            # 여기서는 이미 extrap_df에서 g와 m이 수렴하고 있으므로 fcf_tv를 그대로 쓰되,
+            # 산식의 일관성을 위해 rf(terminal_g)에 의한 성장을 재확인
             fcf_tv = max(fcf_tv, 0.0)   # negative terminal FCF → TV = 0
 
-            tv_wacc = cfg.wacc_end
             spread  = tv_wacc - rf
             if spread <= 0:
                 spread = 0.01   # safety floor: 100bps
@@ -535,9 +546,9 @@ class RollingDCFEngine:
             # EV: survival prob applied; never negative (worst case = 0)
             ev           = max((pv_fcfs + pv_tv) * cfg.survival_prob, 0.0)
             base_cash    = rolling_cash.get(base_year, actuals.cash)
-            # For early-stage: rolling cash uses RAISED capital, not cumulative FCF
-            # (already 0-floored FCF means cash doesn't drain from operating losses)
-            equity_value = ev + base_cash - actuals.debt
+            
+            # 다모다란 Equity Value = EV + Cash + ST Invest - Debt - Minority
+            equity_value = ev + base_cash + actuals.st_investments - actuals.debt - actuals.minority_interest
             target_price = equity_value / actuals.shares if actuals.shares > 0 else float("nan")
 
             results.append({
