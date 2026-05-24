@@ -123,7 +123,12 @@ def get_fnguide_highlight(stock_code):
                     vals.append(None)
                 else:
                     try:
-                        vals.append(str(int(round(float(v)))))
+                        fv = float(v)
+                        # PER·PBR은 소수점 2자리 보존, 나머지는 정수
+                        if mapped in ('PER', 'PBR'):
+                            vals.append(str(round(fv, 2)))
+                        else:
+                            vals.append(str(int(round(fv))))
                     except:
                         vals.append(str(v))
             rows_out[mapped] = vals
@@ -194,6 +199,74 @@ def get_fnguide_highlight(stock_code):
 
             psr_vals.append(str(psr) if psr is not None else None)
         rows_out['PSR'] = psr_vals
+
+        # ── SVD_Invest에서 소수점 PER/PBR 덮어쓰기 ────────────────────
+        # highlight는 정수지만 Invest 페이지는 최고/최저 소수점 제공
+        # → (최고+최저)/2 로 연간 평균 PER/PBR 계산
+        try:
+            inv_url = (f"https://comp.fnguide.com/SVO2/ASP/SVD_Invest.asp"
+                       f"?pGB=1&gicode=A{stock_code}&cID=&MenuYn=Y&ReportGB=D&NewMenuID=109&stkGb=701")
+            inv_resp = requests.get(inv_url, headers={**FG_HEADERS, 'Referer': 'https://comp.fnguide.com'}, timeout=15)
+            inv_resp.encoding = 'utf-8'
+            inv_tables = pd.read_html(_io.StringIO(inv_resp.text))
+            if inv_tables:
+                inv_df = inv_tables[0]
+                # 컬럼: MultiIndex (연도, 최고/최저)
+                # 행: 주가(원), 시가총액, PER, PBR
+                inv_df.columns = [
+                    f"{c[0]}_{c[1]}" if isinstance(c, tuple) else str(c)
+                    for c in inv_df.columns
+                ]
+                # 항목명 컬럼
+                label_col = inv_df.iloc[:, 0]
+
+                def get_inv_avg(metric_name):
+                    """최고/최저 평균으로 연간 평균 배수 반환 {연도: 값}"""
+                    mask = label_col.astype(str).str.strip() == metric_name
+                    if not mask.any():
+                        return {}
+                    row_data = inv_df[mask].iloc[0]
+                    result_map = {}
+                    cols = inv_df.columns.tolist()
+                    # 컬럼명 예: '2022/12_최고', '2022/12_최저'
+                    seen_years = {}
+                    for col in cols[1:]:
+                        parts = col.rsplit('_', 1)
+                        if len(parts) != 2:
+                            continue
+                        yr_raw, hi_lo = parts
+                        # 연도 정규화 (YYYY/MM 형식)
+                        m = re.search(r'(\d{4})[./](\d{2})', yr_raw)
+                        if not m:
+                            continue
+                        yr_key = f"{m.group(1)}/{m.group(2)}"
+                        v = safe_float(row_data[col])
+                        if v is None:
+                            continue
+                        if yr_key not in seen_years:
+                            seen_years[yr_key] = []
+                        seen_years[yr_key].append(v)
+                    for yr_key, vals in seen_years.items():
+                        result_map[yr_key] = round(sum(vals) / len(vals), 2)
+                    return result_map
+
+                per_map = get_inv_avg('PER')
+                pbr_map = get_inv_avg('PBR')
+
+                # years_out 순서에 맞춰 덮어쓰기
+                new_per = list(rows_out.get('PER', [None] * len(years_out)))
+                new_pbr = list(rows_out.get('PBR', [None] * len(years_out)))
+                for i, yr in enumerate(years_out):
+                    # 연도 키 추출 (예: '2025/12(E)' → '2025/12')
+                    yr_key = re.sub(r'\(E\)', '', yr).strip()
+                    if yr_key in per_map:
+                        new_per[i] = str(per_map[yr_key])
+                    if yr_key in pbr_map:
+                        new_pbr[i] = str(pbr_map[yr_key])
+                rows_out['PER'] = new_per
+                rows_out['PBR'] = new_pbr
+        except Exception:
+            pass  # Invest 크롤링 실패 시 highlight 정수값 유지
 
         return {
             'years':    years_out,
