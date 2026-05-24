@@ -492,7 +492,7 @@
 
   {# ── 재무제표 히스토리 ── #}
   <div class="card">
-    <div class="card-header">📋 연간 재무제표 (네이버 증권)</div>
+    <div class="card-header">📋 연간 재무제표 </div>
     <div style="padding:12px 20px; overflow-x:auto;">
       {{ result.raw_table | safe }}
     </div>
@@ -664,20 +664,69 @@
     </p>
   </div>
 
-  {# ── EPS × ROE × (1-r) 내재가치 ── #}
+  {# ── RIM (잔여이익모델) ── #}
   <div class="card">
-    <div class="card-header">📊 EPS × ROE × (1-r) 내재가치
+    <div class="card-header">📊 RIM 잔여이익모델 내재가치
       <span style="font-size:11px;font-weight:400;color:#718096;margin-left:8px;">
-        내재가치 = EPS × ROE(배수) × (1 − r) &nbsp;·&nbsp; r = {{ vl.r }}%
+        내재가치 = BPS × (ROE ÷ r) &nbsp;·&nbsp; r = {{ vl.r }}%
       </span>
     </div>
     <div style="overflow-x:auto;padding:0 20px 16px;">
-      <table class="financial-table" style="min-width:520px;">
+      <table class="financial-table" style="min-width:560px;">
+        <thead>
+          <tr>
+            <th>연도</th>
+            <th style="text-align:right;">BPS (원)</th>
+            <th style="text-align:right;">ROE (%)</th>
+            <th style="text-align:right;">내재가치 (원)</th>
+            <th style="text-align:right;">괴리율</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for row in vl.rows %}
+        <tr class="{% if row.is_est %}cons-col{% endif %}">
+          <td>{{ row.year }}</td>
+          <td style="text-align:right;">
+            {% if row.bps is not none %}{{ "{:,}".format(row.bps) }}{% else %}—{% endif %}
+          </td>
+          <td style="text-align:right;">
+            {% if row.roe is not none %}{{ row.roe }}%{% else %}—{% endif %}
+          </td>
+          <td style="text-align:right;font-weight:600;">{{ row.val_rim }}</td>
+          <td style="text-align:right;">
+            {% if row.gap_rim is not none %}
+            <span style="color:{% if row.gap_rim >= 0 %}#276749{% else %}#c53030{% endif %};font-weight:600;">
+              {% if row.gap_rim >= 0 %}▲ +{{ row.gap_rim }}%{% else %}▼ {{ row.gap_rim }}%{% endif %}
+            </span>
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p style="padding:0 20px 12px;color:#a0aec0;font-size:11px;">
+      내재가치 = BPS(원) × (ROE% ÷ r) · ROE > r 이면 저평가 신호
+      · 괴리율 양수(▲) = 저평가, 음수(▼) = 고평가 · 연한 배경 = 컨센서스 추정치(E)
+    </p>
+  </div>
+
+  {# ── 벤저민 그레이엄 모델 ── #}
+  <div class="card">
+    <div class="card-header">📊 벤저민 그레이엄 내재가치
+      <span style="font-size:11px;font-weight:400;color:#718096;margin-left:8px;">
+        내재가치 = EPS × (8.5 + 2×g)
+        {% if vl.graham_g is not none %}
+        &nbsp;·&nbsp; g = {{ vl.graham_g }}% (실적 EPS CAGR)
+        {% endif %}
+      </span>
+    </div>
+    <div style="overflow-x:auto;padding:0 20px 16px;">
+      <table class="financial-table" style="min-width:420px;">
         <thead>
           <tr>
             <th>연도</th>
             <th style="text-align:right;">EPS (원)</th>
-            <th style="text-align:right;">ROE (%)</th>
             <th style="text-align:right;">내재가치 (원)</th>
             <th style="text-align:right;">괴리율</th>
           </tr>
@@ -689,14 +738,11 @@
           <td style="text-align:right;">
             {% if row.eps is not none %}{{ "{:,}".format(row.eps) }}{% else %}—{% endif %}
           </td>
+          <td style="text-align:right;font-weight:600;">{{ row.val_graham }}</td>
           <td style="text-align:right;">
-            {% if row.roe is not none %}{{ row.roe }}%{% else %}—{% endif %}
-          </td>
-          <td style="text-align:right;font-weight:600;">{{ row.val_eps_roe }}</td>
-          <td style="text-align:right;">
-            {% if row.gap_eps_roe is not none %}
-            <span style="color:{% if row.gap_eps_roe >= 0 %}#276749{% else %}#c53030{% endif %};font-weight:600;">
-              {% if row.gap_eps_roe >= 0 %}▲ +{{ row.gap_eps_roe }}%{% else %}▼ {{ row.gap_eps_roe }}%{% endif %}
+            {% if row.gap_graham is not none %}
+            <span style="color:{% if row.gap_graham >= 0 %}#276749{% else %}#c53030{% endif %};font-weight:600;">
+              {% if row.gap_graham >= 0 %}▲ +{{ row.gap_graham }}%{% else %}▼ {{ row.gap_graham }}%{% endif %}
             </span>
             {% else %}—{% endif %}
           </td>
@@ -706,8 +752,8 @@
       </table>
     </div>
     <p style="padding:0 20px 12px;color:#a0aec0;font-size:11px;">
-      내재가치 = EPS(원) × ROE(%) × (1 − r) · ROE는 % 수치를 배수로 직접 사용 (예: ROE 11% → ×11)
-      · 괴리율 양수(▲) = 저평가, 음수(▼) = 고평가 · 연한 배경 = 컨센서스 추정치(E)
+      내재가치 = EPS × (8.5 + 2×g) · 8.5 = 무성장 기업 기본 PER · g = 실적 연도 EPS CAGR(%, 0~30% 클램프)
+      · EPS 적자 연도 제외 · 괴리율 양수(▲) = 저평가, 음수(▼) = 고평가 · 연한 배경 = 컨센서스 추정치(E)
     </p>
   </div>
 

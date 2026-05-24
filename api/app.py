@@ -665,27 +665,44 @@ def calc_valuation_band(naver_data, current_price):
 # ── 8. EPS 가치평가 ──────────────────────────────────────────────
 def calc_eps_valuations(fin_data, r, current_price):
     """
-    연도별 EPS/r 및 EPS×ROE×(1-r) 내재가치 계산.
-    r: 요구수익률 (소수, e.g. 0.131)
-    ROE: FnGuide에서 정수 % (e.g. 11) → 배수 그대로 사용
+    연도별 가치평가 3종:
+      1. EPS/r          : 내재가치 = EPS / r
+      2. RIM            : 내재가치 = BPS × (ROE / r)
+                          ROE는 FnGuide 정수 % (e.g. 11) → 소수 변환 후 계산
+      3. 벤저민 그레이엄 : 내재가치 = EPS × (8.5 + 2×g)
+                          g = 실적 연도 EPS CAGR (연간 %, 소수)
+    r: 요구수익률 소수 (e.g. 0.138)
     """
     rows     = fin_data['rows']
     years    = fin_data['years']
+    hist_idx = fin_data['hist_idx']
 
-    result_rows = []
     eps_list = rows.get('EPS', [])
+    bps_list = rows.get('BPS', [])
     roe_list = rows.get('ROE', [])
 
+    # ── 실적 EPS CAGR 계산 (그레이엄 g) ──────────────────────────
+    # 실적 연도 중 EPS > 0 인 값만 사용 (적자 연도 제외)
+    hist_eps_vals = []
+    for i in hist_idx:
+        v = safe_float(eps_list[i]) if i < len(eps_list) else None
+        if v and v > 0:
+            hist_eps_vals.append(v)
+
+    graham_g = None
+    if len(hist_eps_vals) >= 2:
+        n = len(hist_eps_vals) - 1
+        raw_g = (hist_eps_vals[-1] / hist_eps_vals[0]) ** (1.0 / n) - 1.0
+        # 현실적 범위 클램프: 0% ~ 30%
+        graham_g = max(0.0, min(raw_g, 0.30))
+
+    result_rows = []
+
     for i, yr in enumerate(years):
-        eps = None
-        if i < len(eps_list):
-            eps = safe_float(eps_list[i])
-
-        roe = None
-        if i < len(roe_list):
-            roe = safe_float(roe_list[i])
-
-        is_est = '(E)' in str(yr)
+        eps = safe_float(eps_list[i]) if i < len(eps_list) else None
+        bps = safe_float(bps_list[i]) if i < len(bps_list) else None
+        roe_raw = safe_float(roe_list[i]) if i < len(roe_list) else None  # FnGuide: 정수 %
+        is_est  = '(E)' in str(yr)
 
         if eps is None:
             continue
@@ -695,23 +712,44 @@ def calc_eps_valuations(fin_data, r, current_price):
         gap_eps_r = round((val_eps_r - current_price) / current_price * 100, 1) \
                     if val_eps_r is not None and current_price and current_price > 0 else None
 
-        # 2. EPS × ROE(%) × (1 - r)
-        val_eps_roe = round(eps * roe * (1 - r)) if roe is not None and r and r > 0 else None
-        gap_eps_roe = round((val_eps_roe - current_price) / current_price * 100, 1) \
-                      if val_eps_roe is not None and current_price and current_price > 0 else None
+        # 2. RIM: BPS × (ROE% / r)
+        #    ROE가 정수%이므로 소수로 변환 후 사용
+        val_rim = None
+        gap_rim = None
+        if bps is not None and roe_raw is not None and r and r > 0:
+            roe_dec = roe_raw / 100.0   # 예: 11 → 0.11
+            val_rim = round(bps * (roe_dec / r))
+            if current_price and current_price > 0:
+                gap_rim = round((val_rim - current_price) / current_price * 100, 1)
+
+        # 3. 벤저민 그레이엄: EPS × (8.5 + 2×g)
+        #    g는 실적 EPS CAGR(소수), 적자 EPS 연도는 '-' 표시
+        val_graham = None
+        gap_graham = None
+        if eps > 0 and graham_g is not None:
+            val_graham = round(eps * (8.5 + 2 * graham_g * 100))
+            if current_price and current_price > 0:
+                gap_graham = round((val_graham - current_price) / current_price * 100, 1)
 
         result_rows.append({
             'year':        yr,
             'is_est':      is_est,
             'eps':         round(eps),
-            'roe':         roe,
+            'bps':         round(bps) if bps is not None else None,
+            'roe':         roe_raw,
             'val_eps_r':   f"{val_eps_r:,}" if val_eps_r is not None else '-',
             'gap_eps_r':   gap_eps_r,
-            'val_eps_roe': f"{val_eps_roe:,}" if val_eps_roe is not None else '-',
-            'gap_eps_roe': gap_eps_roe,
+            'val_rim':     f"{val_rim:,}" if val_rim is not None else '-',
+            'gap_rim':     gap_rim,
+            'val_graham':  f"{val_graham:,}" if val_graham is not None else '-',
+            'gap_graham':  gap_graham,
         })
 
-    return {'r': round(r * 100, 2), 'rows': result_rows}
+    return {
+        'r':        round(r * 100, 2),
+        'graham_g': round(graham_g * 100, 1) if graham_g is not None else None,
+        'rows':     result_rows,
+    }
 
 
 # ── 9. 재무 테이블 HTML ────────────────────────────────────────
