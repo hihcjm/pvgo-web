@@ -679,20 +679,16 @@ def calc_eps_valuations(fin_data, r, current_price):
     bps_list = rows.get('BPS', [])
     roe_list = rows.get('ROE', [])
 
-    # ── 실적 EPS CAGR 계산 (그레이엄 g) ──────────────────────────
-    # 실적 연도 중 EPS > 0 인 값만 사용 (적자 연도 제외)
-    hist_eps_vals = []
-    for i in hist_idx:
-        v = safe_float(eps_list[i]) if i < len(eps_list) else None
-        if v and v > 0:
-            hist_eps_vals.append(v)
+    # ── 그레이엄 g: 전체 연도(실적+추정) ROE 평균값 ──
+    # FnGuide ROE는 정수 % (e.g. 11) → 소수로 변환하여 평균
+    all_idx = list(hist_idx) + list(fin_data.get('est_idx', []))
+    roe_vals = []
+    for i in all_idx:
+        v = safe_float(roe_list[i]) if i < len(roe_list) else None
+        if v is not None and v > 0:
+            roe_vals.append(v / 100.0)   # % → 소수
 
-    graham_g = None
-    if len(hist_eps_vals) >= 2:
-        n = len(hist_eps_vals) - 1
-        raw_g = (hist_eps_vals[-1] / hist_eps_vals[0]) ** (1.0 / n) - 1.0
-        # 현실적 범위 클램프: 0% ~ 30%
-        graham_g = max(0.0, min(raw_g, 0.30))
+    graham_g = round(sum(roe_vals) / len(roe_vals), 4) if roe_vals else None
 
     result_rows = []
 
