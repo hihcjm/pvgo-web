@@ -381,6 +381,12 @@
   <div class="card">
     <div class="card-header">📊 주요 지표</div>
     <div class="kpi-grid">
+      {% if result.kpi.eps %}
+      <div class="kpi-item">
+        <div class="kpi-label">EPS</div>
+        <div class="kpi-val">{{ "{:,.0f}".format(result.kpi.eps) }}원</div>
+      </div>
+      {% endif %}
       {% if result.kpi.per %}
       <div class="kpi-item">
         <div class="kpi-label">PER</div>
@@ -393,10 +399,22 @@
         <div class="kpi-val">{{ result.kpi.pbr }}x</div>
       </div>
       {% endif %}
+      {% if result.kpi.psr %}
+      <div class="kpi-item">
+        <div class="kpi-label">PSR</div>
+        <div class="kpi-val">{{ result.kpi.psr }}x</div>
+      </div>
+      {% endif %}
       {% if result.kpi.roe %}
       <div class="kpi-item">
         <div class="kpi-label">ROE</div>
         <div class="kpi-val">{{ result.kpi.roe }}%</div>
+      </div>
+      {% endif %}
+      {% if result.kpi.op_margin %}
+      <div class="kpi-item">
+        <div class="kpi-label">영업이익률</div>
+        <div class="kpi-val">{{ result.kpi.op_margin }}%</div>
       </div>
       {% endif %}
       {% if result.kpi.div_yield %}

@@ -15,34 +15,14 @@ except ImportError:
 template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'templates')
 app = Flask(__name__, template_folder=template_dir)
 
-NAVER_HEADERS = {
+FG_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Referer': 'https://finance.naver.com',
+    'Referer': 'https://comp.fnguide.com',
     'Accept-Language': 'ko-KR,ko;q=0.9',
 }
 
-# ── 컬럼명 정규화 ──────────────────────────────────────────────
-def get_col_year(c):
-    if isinstance(c, tuple):
-        for part in c:
-            if re.search(r'20\d\d', str(part)):
-                return str(part)
-    else:
-        if re.search(r'20\d\d', str(c)):
-            return str(c)
-    return None
-
-def norm_year(s):
-    s = str(s).strip()
-    is_est = '(E)' in s
-    m = re.search(r'(\d{4})', s)
-    year = m.group(1) if m else s
-    mm = re.search(r'[./](\d{2})', s)
-    month = mm.group(1) if mm else '12'
-    label = f"{year}/{month}"
-    if is_est:
-        label += '(E)'
-    return label
+# 하위 호환 alias (WiseReport 등 다른 크롤러에서 참조)
+NAVER_HEADERS = FG_HEADERS
 
 # ── 1. 종목코드 변환 ───────────────────────────────────────────
 def get_stock_code(company_name):
@@ -55,129 +35,7 @@ def get_stock_code(company_name):
     except:
         return None
 
-# ── 2. 네이버 PC Financial Summary 크롤링 ─────────────────────
-def _fetch_naver_main(stock_code):
-    url = f"https://finance.naver.com/item/main.naver?code={stock_code}"
-    resp = requests.get(url, headers=NAVER_HEADERS, timeout=20)
-    if resp.status_code != 200:
-        return None, None
-    resp.encoding = 'utf-8'
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    return soup, resp.text
-
-def get_naver_finance(stock_code):
-    """
-    BeautifulSoup으로 '주요재무정보' 테이블을 직접 파싱.
-    반환: {
-      'years':     ['2023/12', '2024/12', '2025/12', '2026/12(E)'],
-      'hist_idx':  [0,1,2],
-      'est_idx':   [3],
-      'rows':      {'매출액': [...], 'EPS': [...], ...},
-      'soup':      BeautifulSoup 객체
-    }
-    """
-    soup, _ = _fetch_naver_main(stock_code)
-    if soup is None:
-        return None
-
-    tbodies = soup.find_all('tbody')
-    if len(tbodies) < 3:
-        return None
-    fin_tbody = tbodies[2]
-    fin_table_tag = fin_tbody.find_parent('table')
-    if fin_table_tag is None:
-        return None
-
-    thead = fin_table_tag.find('thead')
-    if thead is None:
-        return None
-
-    header_rows = thead.find_all('tr')
-    if len(header_rows) < 2:
-        return None
-
-    annual_col_count = 0
-    for th in header_rows[0].find_all(['th', 'td']):
-        txt = th.get_text(strip=True)
-        if '연간' in txt:
-            try:
-                annual_col_count = int(th.get('colspan', 1))
-            except:
-                annual_col_count = 4
-            break
-
-    year_ths = header_rows[1].find_all(['th', 'td'])
-    year_labels = []
-    annual_col_indices = []
-    for i, th in enumerate(year_ths):
-        if annual_col_count and i >= annual_col_count:
-            break
-        txt = th.get_text(strip=True)
-        if re.search(r'20\d\d', txt):
-            year_labels.append(norm_year(txt))
-            annual_col_indices.append(i)
-
-    if not year_labels:
-        return None
-
-    ROW_ALIASES = {
-        '매출액':         '매출액',
-        '영업이익':       '영업이익',
-        '영업이익(발표)': '영업이익',
-        '영업이익률':     '영업이익률',
-        '당기순이익':     '당기순이익',
-        '순이익률':       '순이익률',
-        'ROE(지배주주)':  'ROE',
-        'ROE(%)':         'ROE',
-        '부채비율':       '부채비율',
-        '당좌비율':       '당좌비율',
-        '유보율':         '자본유보율',
-        'EPS(원)':        'EPS',
-        'PER(배)':        'PER',
-        'BPS(원)':        'BPS',
-        'PBR(배)':        'PBR',
-        '주당배당금(원)': 'DPS',
-        '시가배당률(%)':  '배당수익률',
-        '배당성향(%)':    '배당성향',
-    }
-
-    rows = {}
-    for tr in fin_tbody.find_all('tr'):
-        th = tr.find('th')
-        raw_name = th.get_text(strip=True) if th else ''
-        if not raw_name:
-            continue
-        mapped = ROW_ALIASES.get(raw_name)
-        if mapped is None:
-            for alias, key in ROW_ALIASES.items():
-                if alias in raw_name:
-                    mapped = key
-                    break
-        if mapped is None:
-            mapped = raw_name
-
-        tds = tr.find_all('td')
-        vals = []
-        for ci in annual_col_indices:
-            if ci < len(tds):
-                v = tds[ci].get_text(strip=True).replace(',', '')
-                vals.append(v if v else '-')
-            else:
-                vals.append('-')
-        rows[mapped] = vals
-
-    hist_idx = [i for i, y in enumerate(year_labels) if '(E)' not in y]
-    est_idx  = [i for i, y in enumerate(year_labels) if '(E)' in y]
-
-    return {
-        'years':    year_labels,
-        'hist_idx': hist_idx,
-        'est_idx':  est_idx,
-        'rows':     rows,
-        'soup':     soup,
-    }
-
-# ── 2b. FnGuide highlight_D_Y: 실적 + 26~28(E) 컨센서스 ──────
+# ── 2. FnGuide highlight_D_Y: 실적 + 26~28(E) 컨센서스 ───────
 def get_fnguide_highlight(stock_code):
     """
     FnGuide SVD_Main의 highlight_D_Y div에서 연간 재무 하이라이트 파싱.
@@ -1195,11 +1053,33 @@ def analyze_stock(company_name, life_cycle=2):
                     return v
             return None
 
-        roe        = last_val('ROE')
+        # ── KPI 지표 추출 (실적 최근 연도 기준) ─────────────────────
         per_trail  = last_val('PER')
         pbr_trail  = last_val('PBR')
-        div_yield  = last_val('배당수익률')
+        psr_val    = last_val('PSR')
+        roe        = last_val('ROE')
+        eps_val    = last_val('EPS')
+        op_margin  = last_val('영업이익률')
         debt_ratio = last_val('부채비율')
+
+        # 배당수익률: FnGuide highlight에 없으므로 DPS ÷ 주가추정 으로 계산
+        # 주가추정 = EPS × PER (실적 기준 역산)
+        div_yield = None
+        for i in reversed(hist_idx):
+            dps_v = get_val(rows, 'DPS', i)
+            eps_v = get_val(rows, 'EPS', i)
+            per_v = get_val(rows, 'PER', i)
+            if dps_v and dps_v > 0 and eps_v and eps_v > 0 and per_v and per_v > 0:
+                implied_price = eps_v * per_v          # 원 (주가 역산)
+                div_yield = round(dps_v / implied_price * 100, 2)
+                break
+        # 현재가 기준 배당수익률이 더 정확하면 덮어씀
+        if current_price and current_price > 0:
+            for i in reversed(hist_idx):
+                dps_v = get_val(rows, 'DPS', i)
+                if dps_v and dps_v > 0:
+                    div_yield = round(dps_v / current_price * 100, 2)
+                    break
 
         # 시가총액 (현재가 × 발행주식수)
         # FnGuide 발행주식수 단위: 천주 → ×1000 해야 실제 주 수
@@ -1225,11 +1105,14 @@ def analyze_stock(company_name, life_cycle=2):
                 "r":    f"{r_value*100:.2f}",
             },
             "kpi": {
-                "per":        round(per_trail,  1) if per_trail   else None,
-                "pbr":        round(pbr_trail,  2) if pbr_trail   else None,
-                "roe":        round(roe,         1) if roe         else None,
-                "div_yield":  round(div_yield,   2) if div_yield   else None,
-                "debt_ratio": round(debt_ratio,  1) if debt_ratio  else None,
+                "per":        round(per_trail, 1)  if per_trail  else None,
+                "pbr":        round(pbr_trail, 2)  if pbr_trail  else None,
+                "psr":        round(psr_val,   2)  if psr_val    else None,
+                "roe":        round(roe,        1)  if roe        else None,
+                "eps":        round(eps_val,    0)  if eps_val    else None,
+                "op_margin":  round(op_margin,  1)  if op_margin  else None,
+                "div_yield":  div_yield,
+                "debt_ratio": round(debt_ratio, 1)  if debt_ratio else None,
             },
             "rdcf": calc_rolling_dcf(fin_data, rf, current_price,
                                      stock_code=stock_code, life_cycle=life_cycle),
