@@ -306,6 +306,41 @@ def get_fnguide_highlight(stock_code):
                     margin.append(None)
             rows_out['순이익률'] = margin
 
+        # PSR = 주가 / SPS(주당매출액)
+        # SPS = 매출액(억원) × 1억 / 발행주식수(주)
+        # 주가 = EPS × PER  (실적 연도 역산)
+        # 추정 연도는 EPS(E) × PER(E) 또는 BPS(E) × PBR(E) 역산
+        sps_row   = rows_out.get('매출액', [])
+        eps_row   = rows_out.get('EPS', [])
+        per_row   = rows_out.get('PER', [])
+        shr_row   = rows_out.get('발행주식수', [])  # 천주 단위
+        psr_vals  = []
+        for i in range(len(years_out)):
+            rev_v = safe_float(sps_row[i]) if i < len(sps_row) else None   # 억원
+            eps_v = safe_float(eps_row[i]) if i < len(eps_row) else None   # 원
+            per_v = safe_float(per_row[i]) if i < len(per_row) else None   # 배
+            shr_v = safe_float(shr_row[i]) if i < len(shr_row) else None   # 천주
+
+            psr = None
+            if rev_v and rev_v > 0 and eps_v and eps_v > 0 and per_v and per_v > 0:
+                price_est = eps_v * per_v                      # 원 (주가 추정)
+                if shr_v and shr_v > 0:
+                    shares = shr_v * 1e3                       # 주
+                    sps    = (rev_v * 1e8) / shares            # 원/주 (주당매출액)
+                else:
+                    # 주식수 없으면 EPS 역산: 주식수 ≈ EPS 기준 지배순이익 / EPS
+                    # SPS = 매출액 / 지배순이익 × EPS
+                    ni_v = safe_float(rows_out.get('지배주주순이익', [None]*i)[i] if i < len(rows_out.get('지배주주순이익',[])) else None)
+                    if ni_v and ni_v > 0:
+                        sps = (rev_v / ni_v) * eps_v           # 원/주
+                    else:
+                        sps = None
+                if sps and sps > 0:
+                    psr = round(price_est / sps, 2)
+
+            psr_vals.append(str(psr) if psr is not None else None)
+        rows_out['PSR'] = psr_vals
+
         return {
             'years':    years_out,
             'rows':     rows_out,
@@ -1093,6 +1128,7 @@ def build_raw_table_html(naver_data):
         ('DPS',               'DPS(원)'),
         ('PER',               'PER(배)'),
         ('PBR',               'PBR(배)'),
+        ('PSR',               'PSR(배)'),
         ('배당수익률',        '배당수익률(%)'),
     ]
 
