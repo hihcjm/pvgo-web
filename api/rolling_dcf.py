@@ -4,28 +4,29 @@ rolling_dcf.py
 Aswath Damodaran 4-Stage Life Cycle DCF Valuation Engine
 for Korean Stocks (K-IFRS Consolidated Financials)
 
+핵심 설계 원칙 (v2)
+-------------------
+  - 모든 스테이지에서 **동일한 FCFF 공식** 사용:
+      FCFF_t = NOPAT_t × (1 − RR_t)
+      RR_t   = g_t / ROIC_t          ← Damodaran 핵심 항등식
+  - 스테이지 분류는 **할인율(effective WACC)** 만 조정:
+      Stage 1 (Startup)    : WACC + stage_premium(default +3%)
+      Stage 2 (High Growth): WACC (기본)
+      Stage 3 (Mature)     : WACC − 0.5%  (리스크 감소 반영)
+      Stage 4 (Decline)    : WACC (기본, 청산 리스크 포함)
+  - 성장 경로는 공통 _growth_path() 로 일원화 → 단계 경계 불연속 없음
+  - 스테이지별 "특수 로직"(파산확률, 청산가치)은 최소한으로만 유지
+
 단위 규약 (Unit Convention)
 --------------------------
-  - 모든 금액은 조원(T-KRW, 1조 = 1e12 원) 기준으로 통일
-  - shares : 조 주(T-shares) → 주당 가치 = equity_value(T) / shares(T) = 원(KRW)
-  - 비율(rate, margin 등) : fraction (0.0 ~ 1.0)
-
-사용 예시
----------
-  fin = Financials(
-      revenue=30.0, ebit=4.5, ebit_margin=0.15, tax_rate=0.22,
-      depr_amort=2.0, capex=3.5, change_wc=0.3,
-      cash_st=5.0, debt=8.0, minority_interest=0.5,
-      shares=0.005,            # 50억주 → 0.005 T-shares
-  )
-  engine = DamodaranDCF(fin, rf=0.035, erp=0.075, beta=1.1)
-  result = engine.calculate_intrinsic_value(stage=2)
-  print(result['intrinsic_value'])   # KRW per share
+  - 모든 금액: 조원(T-KRW, 1조 = 1e12 원)
+  - shares   : 조주(T-shares) → IV = equity_value(T) / shares(T) = 원
+  - 비율      : fraction (0.0 ~ 1.0)
 """
 
 from __future__ import annotations
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -56,8 +57,8 @@ class Financials:
     minority_interest:  float   # 비지배지분 (T-KRW, K-IFRS 연결 특성)
 
     # ── 시장 데이터 ─────────────────────────────────────────────────────────────
-    shares:             float   # 발행주식수 (T-shares, 조 주 단위)
-                                # 예: 5,919,638천주 → 5.919638e9 / 1e12 = 0.005919638
+    shares:             float   # 발행주식수 (T-shares, 조주 단위)
+                                # 예: 5,969,782천주 → 5.969782e9 / 1e12 = 0.005969782
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -66,30 +67,36 @@ class Financials:
 
 class DamodaranDCF:
     """
-    Aswath Damodaran 4-Stage Life Cycle DCF Valuation Engine
+    Damodaran 4-Stage Life Cycle DCF — 단일 FCFF 공식, 단계별 할인율 조정
 
-    Parameters
-    ----------
-    financials : Financials
-        크롤링·전처리 파이프라인에서 전달받은 재무 데이터
-    rf : float
-        한국 국고채 10년물 무위험수익률 (fraction, default 3.5%)
-    erp : float
-        한국 내재 ERP = Base ERP(글로벌) + CRP(Korea) (fraction, default 7.5%)
-        * 다모다란 ERP 기준: Base 5% + Korea CRP ≈ 2.5% → 7.5%
-    beta : float
-        52주 또는 5년 주간 베타 (default 1.0)
-    debt_spread : float
-        부채 신용 스프레드 (fraction, default 1.5%)
-        * EBIT이 음수이면 내부적으로 자동으로 5.0%로 확대
-    equity_weight : float | None
-        자본 비중. None이면 fin.cash_st·debt·shares 등으로 추정.
+    모든 스테이지 공통 FCFF 공식
+    ----------------------------
+      NOPAT_t  = EBIT_t × (1 − tax)
+      RR_t     = g_t / ROIC_t                (Damodaran 재투자율 항등식)
+      FCFF_t   = NOPAT_t × (1 − RR_t)
+      PV_t     = FCFF_t / (1 + eff_wacc)^t   ← eff_wacc는 스테이지별 차등
+
+    스테이지별 effective WACC
+    -------------------------
+      Stage 1: WACC + stage_premium  (default +0.03 = +3%p)
+               스타트업의 높은 불확실성·집중 리스크 반영
+      Stage 2: WACC                  (기본 WACC)
+      Stage 3: WACC − 0.005          (−0.5%p, 성숙기 리스크 감소)
+      Stage 4: WACC                  (기본 WACC, 청산 불확실성 유지)
+
+    성장 경로 (_growth_path)
+    ----------------------
+      기간 1 (t=1~phase1_years)  : g_base, ROIC_base 유지
+      기간 2 (t=phase1+1~total)  : g_base → g_terminal 선형 수렴
+                                   ROIC_base → WACC 선형 수렴
+      Terminal (t>total)         : Gordon Growth, g=g_terminal, ROIC=WACC
     """
 
-    _GUARD_REINV_MIN  = -0.5    # 재투자율 하한 (쇠퇴기 포함)
+    # ── 가드레일 ──────────────────────────────────────────────────────────────
+    _GUARD_REINV_MIN  = -0.80   # 재투자율 하한 (쇠퇴기 자산 회수 허용)
     _GUARD_REINV_MAX  =  0.95   # 재투자율 상한
     _GUARD_ROIC_FLOOR =  0.001  # ROIC 하한 (0 나눗셈 방지)
-    _GUARD_ROIC_CAP   =  0.80   # ROIC 상한 80% — 경자산·플랫폼 기업 허용
+    _GUARD_ROIC_CAP   =  0.80   # ROIC 상한 80%
 
     def __init__(
         self,
@@ -100,62 +107,40 @@ class DamodaranDCF:
         debt_spread:    float = 0.015,
         equity_weight:  Optional[float] = None,
     ):
-        self.fin          = financials
-        self.rf           = rf
-        self.erp          = erp
-        self.beta         = beta
-        self.debt_spread  = debt_spread
-        self._eq_weight   = equity_weight
+        self.fin         = financials
+        self.rf          = rf
+        self.erp         = erp
+        self.beta        = beta
+        self.debt_spread = debt_spread
+        self._eq_weight  = equity_weight
 
-        # WACC는 생성 시 1회 계산 (시장 자본구조 기준)
+        # WACC는 생성 시 1회 계산 — 각 스테이지는 여기에 premium/discount 적용
         self.wacc, self.coe, self.cod = self._calculate_wacc()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # A. WACC 계산
+    # A. WACC 계산 (기본값)
     # ─────────────────────────────────────────────────────────────────────────
 
     def _calculate_wacc(self) -> tuple[float, float, float]:
         """
-        한국 시장 특성을 반영한 WACC 계산.
-
-        Cost of Equity  = rf + β × (Base_ERP + CRP)         ← CAPM
-        Cost of Debt    = rf + spread (EBIT 음수 시 5% 스프레드)
-        가중치           = 시장가치 기준 D/(D+E), E/(D+E)
-
-        Equity 시장가치 추정:
-          - fin.shares(T-shares) × 주당 BV 같은 직접값이 없으므로
-            'debt 대비 경험적 D/E 비율'은 사용하지 않고,
-            대신 caller가 equity_weight를 명시하거나,
-            debt / (debt + implied_equity) 방식으로 추정.
-          - implied_equity: 연결 자본총계를 조원 단위로 전달하거나
-            없을 경우 전통적 70:30 (equity:debt) 기본값 사용.
+        CoE = rf + β × ERP   (CAPM)
+        CoD = (rf + spread) × (1 − t)   (after-tax)
+        WACC = e_w × CoE + d_w × CoD
         """
-        # ── Cost of Equity (CAPM) ───────────────────────────────────────────
         coe = self.rf + self.beta * self.erp
 
-        # ── Cost of Debt ────────────────────────────────────────────────────
-        # EBIT이 음수(적자)이면 부도 위험 상승 → 스프레드 확대
-        if self.fin.ebit <= 0:
-            effective_spread = max(self.debt_spread, 0.05)
-        else:
-            effective_spread = self.debt_spread
-        cod_pretax = self.rf + effective_spread
-        cod        = cod_pretax * (1 - self.fin.tax_rate)   # After-tax
+        spread    = max(self.debt_spread, 0.05) if self.fin.ebit <= 0 else self.debt_spread
+        cod_pre   = self.rf + spread
+        cod       = cod_pre * (1 - self.fin.tax_rate)
 
-        # ── 자본구조 가중치 ──────────────────────────────────────────────────
         if self._eq_weight is not None:
             e_w = max(0.0, min(1.0, self._eq_weight))
             d_w = 1.0 - e_w
         else:
-            total = self.fin.debt
-            if total > 0:
-                # EBIT 기반 간이 Debt/EV 추정
-                # NOPAT 배수(EV/NOPAT ≈ 15배)로 implied EV 추정
+            if self.fin.debt > 0:
                 nopat_proxy = max(self.fin.ebit * (1 - self.fin.tax_rate), 1e-6)
-                implied_ev  = nopat_proxy / max(self.wacc if hasattr(self, 'wacc') else 0.08, 0.05)
-                # 첫 번째 호출이므로 wacc 미정 → 대신 COE 기반 EV 추정
                 implied_ev  = nopat_proxy / max(coe * 0.9, 0.05)
-                d_w = min(total / (implied_ev + total), 0.60)   # Debt 비중 상한 60%
+                d_w = min(self.fin.debt / (implied_ev + self.fin.debt), 0.60)
                 e_w = 1.0 - d_w
             else:
                 e_w, d_w = 1.0, 0.0
@@ -168,56 +153,31 @@ class DamodaranDCF:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _nopat(self) -> float:
-        """세후 영업이익 (NOPAT = EBIT × (1 − t))"""
         return self.fin.ebit * (1 - self.fin.tax_rate)
-
-    def _base_reinvestment_rate(self) -> float:
-        """
-        재투자율 = (CapEx − D&A + ΔWC) / NOPAT
-        NOPAT ≤ 0이면 수익성 없는 성장으로 간주하여 0.5 반환.
-        """
-        nopat = self._nopat()
-        if nopat <= 0:
-            return 0.5
-        reinv  = self.fin.capex - self.fin.depr_amort + self.fin.change_wc
-        rr     = reinv / nopat
-        return max(self._GUARD_REINV_MIN, min(rr, self._GUARD_REINV_MAX))
 
     def _base_roic(self) -> float:
         """
-        ROIC = NOPAT / Invested Capital
-
-        Invested Capital 추정 방법 (min 선택):
-          1. D&A 기반 : D&A × 7년 → 유형·무형자산 장부가 역산
-             - 반도체·중공업 등 자본집약 기업에 적합
-          2. 매출 기반 : revenue × 0.3 (자산회전율 3.3x — 경자산·서비스 기업)
-             - revenue × 0.5 에서 0.3으로 조정: 경자산 기업 IC 과대 추정 방지
-
-        min() 선택 이유:
-          - IC를 작게 잡을수록 ROIC가 높아지므로, 과대 평가를 막기 위해
-            더 보수적인(큰) IC 쪽을 선택해야 함.
-          - 단, D&A×7이 과도하게 크게 나오는 자본집약 기업에서는
-            매출 기반이 현실적인 하한 역할을 함.
-          → 두 값 중 max를 사용: 더 큰 IC → 더 낮은 ROIC → 보수적 추정
-
-        ROIC 상한 80%:
-          - 다모다란 실증치: 최상위 플랫폼·소프트웨어 기업 50~80% 수준
-          - 기존 40% 캡은 경자산 기업에서 g를 과소평가하는 주요 원인이었음
+        ROIC = NOPAT / IC
+        IC = max(D&A×7, Revenue×0.3)  — 보수적 추정(더 큰 IC → 더 낮은 ROIC)
         """
         nopat = self._nopat()
         da    = max(self.fin.depr_amort, 1e-9)
-
-        # IC 추정
-        ic_da_based  = da * 7.0                  # D&A 기반 (상각연수 7년, 자본집약 업종)
-        ic_rev_based = self.fin.revenue * 0.3    # 매출 기반 (자산회전율 3.3x, 경자산 업종)
-        ic   = max(ic_da_based, ic_rev_based, 1e-9)
-        roic = nopat / ic
-
+        ic    = max(da * 7.0, self.fin.revenue * 0.3, 1e-9)
+        roic  = nopat / ic
         return min(max(roic, self._GUARD_ROIC_FLOOR), self._GUARD_ROIC_CAP)
 
+    def _base_reinvestment_rate(self) -> float:
+        """현재 재무제표 역산 RR = (CapEx − D&A + ΔWC) / NOPAT"""
+        nopat = self._nopat()
+        if nopat <= 0:
+            return 0.50
+        reinv = self.fin.capex - self.fin.depr_amort + self.fin.change_wc
+        rr    = reinv / nopat
+        return max(self._GUARD_REINV_MIN, min(rr, self._GUARD_REINV_MAX))
+
     @staticmethod
-    def _pv_factor(wacc: float, t: int) -> float:
-        return 1.0 / ((1.0 + wacc) ** t)
+    def _pv_factor(rate: float, t: int) -> float:
+        return 1.0 / ((1.0 + rate) ** t)
 
     def _equity_bridge(
         self,
@@ -226,26 +186,20 @@ class DamodaranDCF:
         extra: Optional[dict]       = None,
     ) -> dict:
         """
-        Equity Value Bridge (K-IFRS 연결재무제표 기준)
-        ─────────────────────────────────────────────
-        Equity Value = EV + Cash & ST Invest
-                          − Total Debt
-                          − Minority Interest    ← K-IFRS 연결 특성 반영
-        주당 내재가치 = Equity Value (T-KRW) / Shares (T-shares)
-                     = KRW per share
+        Equity Bridge (K-IFRS 연결 기준)
+        Equity = EV + Cash − Debt − Minority Interest
+        IV     = Equity (T-KRW) / Shares (T-shares) = 원/주
         """
-        equity_value     = ev + self.fin.cash_st - self.fin.debt - self.fin.minority_interest
-        # shares: T-shares (조 주), equity_value: T-KRW (조원)
-        # 조원 / 조주 = 원/주  → 단위 완벽 일치
-        price_per_share  = (equity_value / self.fin.shares) if self.fin.shares > 0 else 0.0
+        equity_value    = ev + self.fin.cash_st - self.fin.debt - self.fin.minority_interest
+        price_per_share = (equity_value / self.fin.shares) if self.fin.shares > 0 else 0.0
 
         result = {
-            "intrinsic_value": price_per_share,     # KRW per share
-            "ev":              ev,                   # T-KRW
-            "equity_value":    equity_value,         # T-KRW
-            "cash_st":         self.fin.cash_st,     # T-KRW
-            "debt":            self.fin.debt,        # T-KRW
-            "minority":        self.fin.minority_interest,  # T-KRW
+            "intrinsic_value": price_per_share,
+            "ev":              ev,
+            "equity_value":    equity_value,
+            "cash_st":         self.fin.cash_st,
+            "debt":            self.fin.debt,
+            "minority":        self.fin.minority_interest,
             "wacc":            self.wacc,
             "coe":             self.coe,
             "cod":             self.cod,
@@ -259,31 +213,134 @@ class DamodaranDCF:
         return result
 
     # ─────────────────────────────────────────────────────────────────────────
-    # C. 공개 인터페이스
+    # C. 공통 성장 경로 엔진  ← 모든 스테이지가 이 함수를 공유
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _growth_path(
+        self,
+        g_base:       float,
+        roic_base:    float,
+        g_terminal:   float,
+        eff_wacc:     float,
+        phase1_years: int   = 5,
+        phase2_years: int   = 5,
+        nopat_start:  Optional[float] = None,
+        note:         str   = "",
+    ) -> tuple[list[dict], float, float]:
+        """
+        모든 스테이지 공유 FCFF 경로 생성기.
+
+        공통 FCFF 공식
+        -------------
+          NOPAT_t  = NOPAT_{t-1} × (1 + g_t)
+          RR_t     = clip( g_t / ROIC_t, RR_MIN, RR_MAX )
+          FCFF_t   = NOPAT_t × (1 − RR_t)
+          PV_t     = FCFF_t / (1 + eff_wacc)^t
+
+        성장 경로
+        ---------
+          기간 1 (t=1..phase1_years)  : g=g_base, ROIC=roic_base (유지)
+          기간 2 (t=+1..+phase2_years): g → g_terminal 선형 수렴
+                                        ROIC → eff_wacc (성숙 기준) 선형 수렴
+          Terminal (t=total+1..∞)     : Gordon Growth
+
+        Parameters
+        ----------
+        g_base       : 1기 성장률
+        roic_base    : 1기 ROIC
+        g_terminal   : 영구 성장률 (≤ rf 강제)
+        eff_wacc     : 이 스테이지의 effective 할인율
+        phase1_years : 고성장 유지 기간
+        phase2_years : 수렴 기간
+        nopat_start  : 시작 NOPAT (None이면 현재 재무제표 기반)
+        note         : fcff_schedule에 기록될 스테이지 레이블
+
+        Returns
+        -------
+        (fcffs, pv_sum, pv_tv)
+        """
+        g_terminal = min(g_terminal, self.rf)   # 절대 상한: rf
+        g_terminal = max(g_terminal, 0.005)     # 최소 0.5% (디플레이션 방지)
+
+        total_years  = phase1_years + phase2_years
+        current_nopat = (nopat_start if nopat_start is not None
+                         else self._nopat())
+
+        # NOPAT ≤ 0 이면 수익성 회복까지 완충 처리
+        if current_nopat <= 0:
+            current_nopat = max(self.fin.revenue * 0.01, 1e-9)  # 매출 1% 최소 수익 가정
+
+        fcffs     = []
+        pv_sum    = 0.0
+
+        for t in range(1, total_years + 1):
+            # ── 성장률·ROIC 경로 ─────────────────────────────────────────────
+            if t <= phase1_years:
+                g_t    = g_base
+                roic_t = roic_base
+                phase  = f"phase1_{note}" if note else "phase1"
+            else:
+                alpha  = (t - phase1_years) / phase2_years   # 0 → 1
+                g_t    = g_base    * (1 - alpha) + g_terminal  * alpha
+                roic_t = roic_base * (1 - alpha) + eff_wacc    * alpha
+                roic_t = max(roic_t, self._GUARD_ROIC_FLOOR)
+                phase  = f"phase2_{note}" if note else "phase2"
+
+            # ── 공통 FCFF 계산 ───────────────────────────────────────────────
+            rr_t   = max(self._GUARD_REINV_MIN,
+                         min(g_t / roic_t, self._GUARD_REINV_MAX))
+            current_nopat *= (1 + g_t)
+            fcf_t  = current_nopat * (1 - rr_t)
+            pv_t   = fcf_t * self._pv_factor(eff_wacc, t)
+            pv_sum += pv_t
+
+            fcffs.append({
+                "year":       t,
+                "growth_g":   round(g_t,           4),
+                "roic":       round(roic_t,         4),
+                "reinv_rate": round(rr_t,           4),
+                "nopat":      round(current_nopat,  4),
+                "fcf":        round(fcf_t,          4),
+                "pv_fcf":     round(pv_t,           4),
+                "eff_wacc":   round(eff_wacc,       4),
+                "phase":      phase,
+            })
+
+        # ── Terminal Value (Gordon Growth) ───────────────────────────────────
+        rr_tv     = g_terminal / max(eff_wacc, g_terminal + 0.001)
+        nopat_tv  = current_nopat * (1 + g_terminal)
+        fcf_tv    = nopat_tv * (1 - rr_tv)
+        tv        = fcf_tv / max(eff_wacc - g_terminal, 0.001)
+        pv_tv     = tv * self._pv_factor(eff_wacc, total_years)
+
+        return fcffs, pv_sum, pv_tv
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # D. 공개 인터페이스
     # ─────────────────────────────────────────────────────────────────────────
 
     def calculate_intrinsic_value(self, stage: int = 2, **kwargs) -> dict:
         """
-        생애주기(stage)에 따라 DCF 로직을 분기하여 주당 내재가치를 반환.
+        생애주기(stage)에 따라 DCF를 계산하여 주당 내재가치를 반환.
 
         Parameters
         ----------
         stage : int
             1 = Startup   (신생·초기 성장기)
-            2 = High Growth (고성장기)
+            2 = High Growth (고성장기)       ← 대부분의 성장주
             3 = Mature      (성숙 안정기)
             4 = Decline     (쇠퇴·청산기)
-        **kwargs : 각 스테이지별 추가 파라미터 (하단 메서드 doc 참조)
 
         Returns
         -------
         dict : {
-            'intrinsic_value' : float,   # KRW per share ← 핵심 출력값
+            'intrinsic_value' : float,   # KRW per share
             'ev'              : float,   # Enterprise Value (T-KRW)
-            'equity_value'    : float,   # Equity Value    (T-KRW)
-            'wacc'            : float,
-            'fcff_schedule'   : list,    # 연도별 추정 FCFF 내역
-            ... (스테이지별 추가 정보)
+            'equity_value'    : float,   # Equity Value (T-KRW)
+            'wacc'            : float,   # 기본 WACC
+            'eff_wacc'        : float,   # 스테이지별 effective WACC
+            'fcff_schedule'   : list,    # 연도별 FCFF 내역
+            ...
         }
         """
         dispatch = {
@@ -292,118 +349,103 @@ class DamodaranDCF:
             3: self._mature_valuation,
             4: self._decline_valuation,
         }
-        func = dispatch.get(stage, self._high_growth_valuation)
-        return func(**kwargs)
+        return dispatch.get(stage, self._high_growth_valuation)(**kwargs)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # D-1. Stage 1: Startup — Top-Down 추정
+    # D-1. Stage 1: Startup
     # ─────────────────────────────────────────────────────────────────────────
 
     def _startup_valuation(
         self,
-        tam:                float = 0.0,
-        target_share:       float = 0.10,
-        target_margin:      float = 0.15,
-        prob_failure:       float = 0.30,
+        tam:                 float = 0.0,
+        target_share:        float = 0.10,
+        target_margin:       float = 0.15,
+        prob_failure:        float = 0.30,
         liquidation_val_pct: float = 0.50,
-        ramp_years:         int   = 10,
+        ramp_years:          int   = 10,
+        stage_premium:       float = 0.03,
         **kwargs,
     ) -> dict:
         """
-        Option 1: 신생·초기 성장기 — Top-Down 추정
+        Stage 1 — Startup: TAM 기반 Top-Down 매출 추정
+
+        동일 FCFF 공식 사용. 스타트업 특성만 다음으로 반영:
+          - eff_wacc = WACC + stage_premium (default +3%p)
+          - 파산 확률(prob_failure) 반영한 기대 EV 계산
+          - NOPAT 시작값: TAM 도달 경로의 1년차 추정값
 
         Parameters
         ----------
-        tam              : 목표 시장 규모 T-KRW (미입력 시 현재 매출의 20배)
-        target_share     : 10년 뒤 시장 점유율 (default 10%)
-        target_margin    : 10년 뒤 EBIT 마진  (default 15%)
-        prob_failure     : 파산 확률           (default 30%)
-        liquidation_val_pct : 파산 시 현금성 자산 회수율 (default 50%)
-        ramp_years       : 추정 기간            (default 10년)
-
-        로직
-        ----
-        1. 현재 매출 → 10년 뒤 목표 매출(TAM × 점유율)로 직선 성장률 계산
-        2. EBIT 마진도 현재 → 목표 마진으로 선형 개선
-        3. 재투자율은 초기 높고(0.8) 점차 낮아짐(rr_terminal)
-        4. EV = Σ PV(FCFF) + PV(Terminal Value)
-        5. Going-Concern Value × (1 − P_failure) + Liquidation Value × P_failure
+        tam                  : 목표 시장 규모 (T-KRW). 0이면 현재 매출 × 20
+        target_share         : TAM 대비 목표 점유율 (default 10%)
+        target_margin        : 목표 EBIT 마진 (default 15%)
+        prob_failure         : 파산 확률 (default 30%)
+        liquidation_val_pct  : 파산 시 현금 회수율 (default 50%)
+        ramp_years           : 추정 기간 (default 10년)
+        stage_premium        : WACC 가산 리스크 프리미엄 (default 3%p)
         """
-        # ── 기본 파라미터 설정 ──────────────────────────────────────────────
+        eff_wacc = self.wacc + stage_premium
+
         if tam <= 0:
             tam = self.fin.revenue * 20.0
 
-        rev_yr0     = max(self.fin.revenue, 1e-9)
-        rev_yr_n    = tam * target_share
-        margin_yr0  = self.fin.ebit_margin
-        margin_yr_n = target_margin
+        rev_yr0  = max(self.fin.revenue, 1e-9)
+        rev_yr_n = tam * target_share
 
-        # 초기 재투자율: 스타트업은 거의 모든 현금 재투자
-        rr_initial  = 0.85
-        g_terminal  = min(0.025, self.rf)       # 영구 성장률 ≤ rf (최대 2.5%)
-        rr_terminal = g_terminal / max(self.wacc, 0.01)
+        # 1년차 도달 NOPAT 추정 (TAM 경로 기반)
+        alpha_1  = 1.0 / ramp_years
+        rev_1    = rev_yr0 * ((rev_yr_n / rev_yr0) ** alpha_1)
+        margin_1 = self.fin.ebit_margin + alpha_1 * (target_margin - self.fin.ebit_margin)
+        nopat_1  = max(rev_1 * margin_1 * (1 - self.fin.tax_rate), 1e-9)
 
-        # ── 연도별 FCFF 추정 ────────────────────────────────────────────────
-        fcffs     = []
-        pv_fcff   = 0.0
+        # 암묵적 성장률: TAM 도달을 위한 연 복리 성장률
+        g_base = (rev_yr_n / rev_yr0) ** (1.0 / ramp_years) - 1.0
+        g_base = min(g_base, 0.60)   # 최대 60% 성장률 상한
 
-        for t in range(1, ramp_years + 1):
-            alpha       = t / ramp_years                                 # 0 → 1 선형 보간
-            rev_t       = rev_yr0 * ((rev_yr_n / rev_yr0) ** alpha)     # 지수 경로
-            margin_t    = margin_yr0 + alpha * (margin_yr_n - margin_yr0)
-            ebit_t      = rev_t * margin_t
-            nopat_t     = ebit_t * (1 - self.fin.tax_rate)
+        # ROIC: 초기는 낮음 → target_margin 기반 추정
+        roic_start = max(
+            target_margin * (1 - self.fin.tax_rate) / 0.30,  # 목표 마진 기준 ROIC
+            self._GUARD_ROIC_FLOOR,
+        )
+        roic_start = min(roic_start, self._GUARD_ROIC_CAP)
 
-            # 재투자율: 초기 높고 → 터미널 RR로 수렴
-            rr_t        = rr_initial + alpha * (rr_terminal - rr_initial)
-            rr_t        = max(0.0, min(rr_t, 0.95))
-            fcf_t       = nopat_t * (1 - rr_t)
+        g_terminal = min(0.025, self.rf)
 
-            pv_t        = fcf_t * self._pv_factor(self.wacc, t)
-            pv_fcff    += pv_t
+        fcffs, pv_sum, pv_tv = self._growth_path(
+            g_base       = g_base,
+            roic_base    = roic_start,
+            g_terminal   = g_terminal,
+            eff_wacc     = eff_wacc,
+            phase1_years = ramp_years // 2,
+            phase2_years = ramp_years - ramp_years // 2,
+            nopat_start  = nopat_1,
+            note         = "startup",
+        )
 
-            fcffs.append({
-                "year":      t,
-                "revenue":   round(rev_t,    4),
-                "ebit":      round(ebit_t,   4),
-                "nopat":     round(nopat_t,  4),
-                "reinv_rate": round(rr_t,    4),
-                "fcf":       round(fcf_t,    4),
-                "pv_fcf":    round(pv_t,     4),
-                "note":      "ramp",
-            })
-
-        # ── Terminal Value (Year ramp_years 이후) ───────────────────────────
-        last_nopat = fcffs[-1]["nopat"] * (1 + g_terminal)
-        fcf_term   = last_nopat * (1 - rr_terminal)
-        tv         = fcf_term / max(self.wacc - g_terminal, 0.001)
-        pv_tv      = tv * self._pv_factor(self.wacc, ramp_years)
-
-        # ── Going-Concern Value ─────────────────────────────────────────────
-        going_concern_ev = pv_fcff + pv_tv
-
-        # ── 파산 확률 반영 (다모다란 Distress Value) ─────────────────────────
-        # 파산 시 청산 가치: 현금성 자산의 일부 회수
+        going_concern_ev = pv_sum + pv_tv
         liquidation_val  = (self.fin.cash_st + self.fin.depr_amort * 3) * liquidation_val_pct
         ev               = (going_concern_ev * (1 - prob_failure)
-                           + liquidation_val   *  prob_failure)
+                            + liquidation_val   *  prob_failure)
 
         extra = {
-            "stage":              "startup",
-            "tam":                tam,
-            "target_share":       target_share,
-            "target_margin":      target_margin,
-            "prob_failure":       prob_failure,
-            "going_concern_ev":   going_concern_ev,
-            "liquidation_val":    liquidation_val,
-            "terminal_g":         g_terminal,
-            "pv_stage":           round(pv_fcff, 4),
-            "pv_terminal_value":  round(pv_tv,   4),
+            "stage":             "startup",
+            "eff_wacc":          round(eff_wacc,           4),
+            "stage_premium":     stage_premium,
+            "tam":               tam,
+            "target_share":      target_share,
+            "target_margin":     target_margin,
+            "prob_failure":      prob_failure,
+            "going_concern_ev":  round(going_concern_ev,   4),
+            "liquidation_val":   round(liquidation_val,    4),
+            "g_base":            round(g_base,             4),
+            "terminal_g":        g_terminal,
+            "pv_explicit":       round(pv_sum,             4),
+            "pv_terminal_value": round(pv_tv,              4),
         }
         return self._equity_bridge(ev, fcffs, extra)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # D-2. Stage 2: High Growth — 3-Stage Bottom-Up
+    # D-2. Stage 2: High Growth
     # ─────────────────────────────────────────────────────────────────────────
 
     def _high_growth_valuation(
@@ -411,364 +453,269 @@ class DamodaranDCF:
         g_override:    Optional[float] = None,
         roic_override: Optional[float] = None,
         rev_cagr:      Optional[float] = None,
+        phase1_years:  int   = 5,
+        phase2_years:  int   = 5,
+        g_terminal:    float = 0.025,
         **kwargs,
     ) -> dict:
         """
-        Option 2: 고성장기 — 3-Stage Bottom-Up (Damodaran 방법론)
+        Stage 2 — High Growth: 3-Phase Bottom-Up
 
-        구조
-        ----
-        Phase 1 (t=1~5)  : 고성장기 — g_base 유지, RR=g/ROIC
-        Phase 2 (t=6~10) : 이행기  — g와 ROIC 모두 rf/WACC로 선형 수렴
-        Phase 3 (t=11~∞) : 영구기  — g=g_terminal(≤rf), ROIC=WACC
+        g_base 결정 우선순위
+        --------------------
+        1) g_override  (직접 입력)
+        2) rev_cagr    (역사적 매출 CAGR) — 재무제표 RR 편향 보정
+        3) ROIC × RR_base (재무제표 역산)
+        하한: max(rf×1.5, WACC×0.4)
 
-        성장률(g_base) 결정 로직
-        -----------------------
-        1순위: g_override 명시값
-        2순위: rev_cagr (역사적 매출 CAGR) — 가장 신뢰도 높은 성장 입력
-               단, rev_cagr > ROIC이면 RR=1에 걸리므로 min(rev_cagr, ROIC*0.85)
-        3순위: ROIC × RR_base (재무제표 역산)
-        하한:  max(rf × 1.5, WACC × 0.4) — 성장주 최소 성장 보장
-
-        RR = g / ROIC 공식의 의미
-        --------------------------
-        Damodaran의 Reinvestment Rate = g / ROIC 는
-        "성장률 g를 달성하기 위해 NOPAT의 몇 %를 재투자해야 하나"를 나타냄.
-        g가 높으면 RR도 높아져 단기 FCFF가 줄지만, 고성장이 지속되면
-        장기 Terminal Value가 이를 상쇄하므로 전체 EV는 증가함.
-        이것이 Damodaran 모델의 정상 동작임.
+        Parameters
+        ----------
+        g_override    : 성장률 직접 입력 (fraction)
+        roic_override : ROIC 직접 입력 (fraction)
+        rev_cagr      : 역사적 매출 CAGR (fraction)
+        phase1_years  : 고성장 유지 기간 (default 5년)
+        phase2_years  : 수렴 기간 (default 5년)
+        g_terminal    : 영구 성장률 (default 2.5%, 내부에서 ≤rf 강제)
         """
-        roic    = roic_override if roic_override is not None else self._base_roic()
-        rr_base = self._base_reinvestment_rate()
-        g_roic  = roic * max(rr_base, 0.0)
+        eff_wacc  = self.wacc   # Stage 2 = 기본 WACC
 
-        # ── g_base 결정 ─────────────────────────────────────────────────────
+        roic      = roic_override if roic_override is not None else self._base_roic()
+        rr_base   = self._base_reinvestment_rate()
+        g_roic    = roic * max(rr_base, 0.0)
+
+        # g_base 결정
         if g_override is not None:
             g_base = float(g_override)
         elif rev_cagr is not None and rev_cagr > 0:
-            # rev_cagr을 직접 사용 (블렌딩 최소화)
-            # ROIC 제약: RR=g/ROIC가 95%를 넘지 않도록 g 상한 설정
-            g_max_by_roic = roic * 0.90   # RR ≤ 90%
-            g_base = min(rev_cagr, g_max_by_roic)
-            # 단, g_roic가 더 높으면 g_roic도 고려
-            g_base = max(g_base, g_roic)
+            g_max   = roic * 0.90   # RR ≤ 90% 보장
+            g_base  = max(min(rev_cagr, g_max), g_roic)
         else:
-            g_base = g_roic
+            g_base  = g_roic
 
-        # ── 하한 보정 ───────────────────────────────────────────────────────
-        # 고성장 기업 지정 시 최소한 rf*1.5 이상은 성장해야 함
+        # 하한: 성장주 최소 성장 보장
         g_floor = max(self.rf * 1.5, self.wacc * 0.4)
         if g_base < g_floor and g_override is None:
             g_base = g_floor
 
         g_base = min(g_base, 0.40)   # 절대 상한 40%
 
-        nopat_base    = self._nopat()
-        current_nopat = nopat_base
-        fcffs, pv_fcff, pv_stage1, pv_stage2 = [], 0.0, 0.0, 0.0
+        fcffs, pv_sum, pv_tv = self._growth_path(
+            g_base       = g_base,
+            roic_base    = roic,
+            g_terminal   = g_terminal,
+            eff_wacc     = eff_wacc,
+            phase1_years = phase1_years,
+            phase2_years = phase2_years,
+            nopat_start  = self._nopat(),
+            note         = "high_growth",
+        )
 
-        for t in range(1, 11):
-            if t <= 5:
-                g_t    = g_base
-                roic_t = roic
-                phase  = "high_growth"
-            else:
-                alpha  = (t - 5) / 5.0
-                g_t    = g_base * (1 - alpha) + self.rf * alpha
-                roic_t = max(roic * (1 - alpha) + self.wacc * alpha,
-                             self._GUARD_ROIC_FLOOR)
-                phase  = "transition"
+        pv_s1 = sum(r["pv_fcf"] for r in fcffs if r["year"] <= phase1_years)
+        pv_s2 = sum(r["pv_fcf"] for r in fcffs if r["year"] >  phase1_years)
 
-            # RR = g / ROIC (Damodaran 핵심 공식)
-            rr_t = max(0.0, min(g_t / roic_t, self._GUARD_REINV_MAX))
-
-            current_nopat *= (1 + g_t)
-            fcf_t  = current_nopat * (1 - rr_t)
-            pv_t   = fcf_t * self._pv_factor(self.wacc, t)
-            pv_fcff += pv_t
-            if t <= 5:
-                pv_stage1 += pv_t
-            else:
-                pv_stage2 += pv_t
-
-            fcffs.append({
-                "year":       t,
-                "growth_g":   round(g_t,          4),
-                "roic":       round(roic_t,        4),
-                "reinv_rate": round(rr_t,          4),
-                "nopat":      round(current_nopat, 4),
-                "fcf":        round(fcf_t,         4),
-                "pv_fcf":     round(pv_t,          4),
-                "phase":      phase,
-            })
-
-        # ── Phase 3: 영구 성장기 ─────────────────────────────────────────────
-        # g_terminal = min(g_base, rf) — 절대로 무위험수익률 초과 불가
-        g_terminal  = max(min(g_base, self.rf), 0.01)
-        rr_terminal = g_terminal / max(self.wacc, 0.001)
-        nopat_t11   = current_nopat * (1 + g_terminal)
-        fcf_t11     = nopat_t11 * (1 - rr_terminal)
-        tv          = fcf_t11 / max(self.wacc - g_terminal, 0.001)
-        pv_tv       = tv * self._pv_factor(self.wacc, 10)
-
-        ev = pv_fcff + pv_tv
         extra = {
             "stage":             "high_growth",
-            "g_base":            round(g_base,    4),
+            "eff_wacc":          round(eff_wacc,   4),
+            "g_base":            round(g_base,     4),
             "roic_base":         round(roic,       4),
             "rr_base":           round(rr_base,    4),
-            "terminal_g":        round(g_terminal, 4),
-            "pv_stage1":         round(pv_stage1,  4),
-            "pv_stage2":         round(pv_stage2,  4),
+            "terminal_g":        round(min(g_terminal, self.rf), 4),
+            "pv_stage1":         round(pv_s1,      4),
+            "pv_stage2":         round(pv_s2,      4),
             "pv_terminal_value": round(pv_tv,      4),
         }
-        return self._equity_bridge(ev, fcffs, extra)
+        return self._equity_bridge(pv_sum + pv_tv, fcffs, extra)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # D-3. Stage 3: Mature — 1-Stage 또는 2-Stage 안정 성장 모델
+    # D-3. Stage 3: Mature
     # ─────────────────────────────────────────────────────────────────────────
 
     def _mature_valuation(
         self,
         g_stable:      float = 0.02,
-        use_two_stage: bool  = True,
         g_near:        float = 0.04,
         near_years:    int   = 5,
+        wacc_discount: float = 0.005,
+        g_terminal:    float = 0.02,
         **kwargs,
     ) -> dict:
         """
-        Option 3: 성숙 안정기
+        Stage 3 — Mature: 낮은 성장, 안정적 수익
 
-        [엄격한 규칙] terminal_g = min(g_stable, rf)
-        → 성숙 기업의 영구 성장률은 국가 경제 성장률(≈ rf)을 초과 불가.
+        eff_wacc = WACC − wacc_discount (default −0.5%p)
+        → 성숙기 리스크 감소 반영
+
+        [규칙] terminal_g = min(g_terminal, g_stable, rf)
 
         Parameters
         ----------
-        g_stable      : 영구 성장률 (default 2%). 내부적으로 min(g_stable, rf) 적용.
-        use_two_stage : True면 근기(1~near_years) + 영구기 2-Stage,
-                        False면 단순 고든 성장 모델 (Gordon Growth).
-        g_near        : 2-Stage 사용 시 근기 성장률 (default 4%)
-        near_years    : 근기 기간 (default 5년)
+        g_stable       : 영구 성장률 (default 2%)
+        g_near         : 근기 성장률 (default 4%)
+        near_years     : 근기 기간 (default 5년)
+        wacc_discount  : eff_wacc 할인폭 (default 0.5%p)
+        g_terminal     : 영구 성장률 오버라이드 (default g_stable와 동일)
         """
-        # ── [엄격한 규칙] 영구 성장률 캡핑 ─────────────────────────────────
-        g_terminal = min(g_stable, self.rf)    # 절대로 rf 초과 불가
-        nopat_base = self._nopat()
+        eff_wacc   = max(self.wacc - wacc_discount, self.rf + 0.005)  # rf보다는 높게
+        g_tv       = min(g_stable, g_terminal, self.rf)
 
-        # 재투자율 = g / WACC (성숙기에는 ROIC ≈ WACC)
-        rr_terminal = g_terminal / max(self.wacc, 0.001)
+        roic_base  = self._base_roic()
+        # 성숙기: ROIC는 WACC 수준으로 수렴 (초과 ROIC 감소)
+        roic_start = min(roic_base, eff_wacc * 2.5)   # 최대 WACC × 2.5배로 제한
 
-        fcffs   = []
-        pv_fcff = 0.0
+        fcffs, pv_sum, pv_tv = self._growth_path(
+            g_base       = g_near,
+            roic_base    = roic_start,
+            g_terminal   = g_tv,
+            eff_wacc     = eff_wacc,
+            phase1_years = near_years,
+            phase2_years = 5,
+            nopat_start  = self._nopat(),
+            note         = "mature",
+        )
 
-        if use_two_stage:
-            # ── 2-Stage: 근기 고성장 → 영구 안정 성장 ─────────────────────
-            g_near_eff   = min(g_near, self.wacc)   # 근기도 WACC 초과 방지 (보수적)
-            current_nopat = nopat_base
-
-            for t in range(1, near_years + 1):
-                rr_t = g_near_eff / max(self._base_roic(), 0.001)
-                rr_t = max(rr_terminal, min(rr_t, 0.80))
-                current_nopat *= (1 + g_near_eff)
-                fcf_t  = current_nopat * (1 - rr_t)
-                pv_t   = fcf_t * self._pv_factor(self.wacc, t)
-                pv_fcff += pv_t
-
-                fcffs.append({
-                    "year":       t,
-                    "growth_g":   round(g_near_eff,   4),
-                    "reinv_rate": round(rr_t,          4),
-                    "nopat":      round(current_nopat, 4),
-                    "fcf":        round(fcf_t,         4),
-                    "pv_fcf":     round(pv_t,          4),
-                    "phase":      "near_stable",
-                })
-
-            # 영구 성장기 (near_years 이후)
-            nopat_tv  = current_nopat * (1 + g_terminal)
-            fcf_tv    = nopat_tv * (1 - rr_terminal)
-            tv        = fcf_tv / max(self.wacc - g_terminal, 0.001)
-            pv_tv     = tv * self._pv_factor(self.wacc, near_years)
-            ev        = pv_fcff + pv_tv
-
-        else:
-            # ── 1-Stage: 단순 고든 성장 모델 ────────────────────────────────
-            fcf_stable = nopat_base * (1 + g_terminal) * (1 - rr_terminal)
-            tv         = fcf_stable / max(self.wacc - g_terminal, 0.001)
-            pv_tv      = tv   # 즉시 적용 (t=0 기준)
-            pv_fcff    = 0.0
-            ev         = pv_tv
-
-            fcffs.append({
-                "year":       "∞",
-                "growth_g":   round(g_terminal,     4),
-                "reinv_rate": round(rr_terminal,    4),
-                "nopat":      round(nopat_base,     4),
-                "fcf":        round(fcf_stable / (1 + g_terminal), 4),
-                "pv_fcf":     round(ev,             4),
-                "phase":      "gordon_growth",
-            })
-            pv_tv = ev
+        pv_near = sum(r["pv_fcf"] for r in fcffs if r["year"] <= near_years)
 
         extra = {
             "stage":             "mature",
-            "terminal_g":        round(g_terminal,  4),
-            "terminal_g_capped": g_terminal < g_stable,  # 캡핑 여부 표시
+            "eff_wacc":          round(eff_wacc,   4),
+            "wacc_discount":     wacc_discount,
+            "terminal_g":        round(g_tv,        4),
+            "terminal_g_capped": g_tv < g_stable,
             "rf_cap":            self.rf,
-            "two_stage":         use_two_stage,
-            "pv_near":           round(pv_fcff,     4),
-            "pv_terminal_value": round(pv_tv,       4),
+            "pv_near":           round(pv_near,    4),
+            "pv_terminal_value": round(pv_tv,      4),
         }
-        return self._equity_bridge(ev, fcffs, extra)
+        return self._equity_bridge(pv_sum + pv_tv, fcffs, extra)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # D-4. Stage 4: Decline — Liquidating Cash Flow 모델
+    # D-4. Stage 4: Decline
     # ─────────────────────────────────────────────────────────────────────────
 
     def _decline_valuation(
         self,
-        g_decline:        float = -0.05,
-        capex_ratio:      float = 0.50,
-        liquidation_years: int  = 10,
+        g_decline:         float = -0.05,
+        capex_ratio:       float = 0.50,
+        liquidation_years: int   = 10,
         terminal_multiple: float = 3.0,
         **kwargs,
     ) -> dict:
         """
-        Option 4: 쇠퇴기 — Liquidating Cash Flow 모델
+        Stage 4 — Decline: 매출 감소, 자산 청산 흐름
 
-        핵심 메커니즘
-        -------------
-        1. 매출 성장률 < 0 (g_decline, default −5%)
-        2. CapEx << D&A → 재투자율 음수 → 자산 상각으로 현금 창출
-        3. 10년 청산 구조: 영구가치 대신 잔존 청산가치(BV 배수) 적용
+        동일 FCFF 공식 사용. 쇠퇴기 특성:
+          - g_base < 0 (음수 성장률)
+          - CapEx < D&A → RR < 0 → FCFF > NOPAT (자산 상각으로 현금 창출)
+          - Terminal Value 대신 잔존 자산 청산가치 사용
 
         Parameters
         ----------
         g_decline         : 연간 매출 감소율 (default −5%, 양수 입력 시 자동 음수화)
-        capex_ratio       : CapEx / D&A 비율 (default 0.50, 즉 CapEx = D&A의 50%)
-                            → 재투자율 = (CapEx − D&A + ΔWC) / NOPAT < 0
+        capex_ratio       : CapEx / D&A 비율 (default 0.50)
+                            → capex_ratio < 1 이면 RR < 0 → 자산 회수 현금흐름
         liquidation_years : 청산 기간 (default 10년)
-        terminal_multiple : 잔존 장부가치 회수 배수 (default 3배 D&A 기반 추정)
-
-        [검증]
-        CapEx = D&A × capex_ratio (< D&A)
-        재투자율 = (CapEx − D&A + 0) / NOPAT
-               = D&A × (capex_ratio − 1) / NOPAT
-               < 0   (capex_ratio < 1이므로)
-        → (1 − 재투자율) > 1 → NOPAT보다 많은 현금 창출 ✓
+        terminal_multiple : 잔존 장부가치 회수 배수 (default 3배 D&A)
         """
-        # 성장률이 양수로 입력된 경우 음수로 강제 변환
-        g_decline = -abs(g_decline)
+        g_decline  = -abs(g_decline)
+        eff_wacc   = self.wacc    # Stage 4 = 기본 WACC (청산 불확실성 포함)
 
-        nopat_base    = self._nopat()
-        da_base       = self.fin.depr_amort
-        current_nopat = nopat_base
+        da_base       = max(self.fin.depr_amort, 1e-9)
+        # 쇠퇴기 ROIC: CapEx < D&A 구조를 ROIC에 반영
+        # ROIC_eff = NOPAT / IC  에서 IC를 줄어드는 자산 기준으로 추정
+        roic_decline  = max(self._base_roic() * capex_ratio, self._GUARD_ROIC_FLOOR)
 
-        # 쇠퇴기 CapEx 설정 (D&A의 일부분)
-        effective_capex = da_base * capex_ratio
+        # 초기 NOPAT은 현재 재무제표 기반
+        nopat_start   = max(self._nopat(), da_base * 0.1)   # D&A의 10% 최소 수익성 보장
 
-        # 기초 재투자율 (음수가 되도록 설계)
-        # change_wc는 쇠퇴기에 운전자본 축소(음수 ΔWC = 현금 유입)로 설정
-        wc_release_rate = 0.02   # 연간 매출 2%씩 운전자본 회수
-        rr_initial = (effective_capex - da_base) / max(abs(nopat_base), 1e-9)
-        # rr_initial ≈ (0.5 × D&A − D&A) / NOPAT = −0.5 × D&A / NOPAT < 0
+        fcffs, pv_sum, _ = self._growth_path(
+            g_base       = g_decline,    # 음수 성장률
+            roic_base    = roic_decline,
+            g_terminal   = g_decline,    # 쇠퇴기: 수렴 없이 계속 하락
+            eff_wacc     = eff_wacc,
+            phase1_years = liquidation_years // 2,
+            phase2_years = liquidation_years - liquidation_years // 2,
+            nopat_start  = nopat_start,
+            note         = "decline",
+        )
 
-        fcffs     = []
-        pv_fcff   = 0.0
-        rev_t     = self.fin.revenue
-
-        for t in range(1, liquidation_years + 1):
-            # 매출 감소 적용
-            rev_t        *= (1 + g_decline)
-            da_t          = da_base * max(1 + g_decline * t * 0.5, 0.2)   # D&A도 점차 감소
-            capex_t       = da_t * capex_ratio
-            wc_inflow_t   = rev_t * wc_release_rate                        # 운전자본 회수 현금 유입
-
-            # NOPAT: 영업이익 악화 (매출 감소, 마진 압박)
-            margin_t      = self.fin.ebit_margin * max(1 + g_decline * t * 0.3, 0.3)
-            ebit_t        = rev_t * margin_t
-            nopat_t       = ebit_t * (1 - self.fin.tax_rate)
-
-            # 재투자율 (음수 → 현금 창출 가속)
-            reinv_t       = (capex_t - da_t - wc_inflow_t) / max(abs(nopat_t), 1e-9)
-            reinv_t       = max(-0.80, min(reinv_t, 0.20))   # 재투자율 범위 −80%~+20%
-
-            # FCFF > NOPAT (자산 상각으로 현금 추가 창출)
-            fcf_t  = nopat_t * (1 - reinv_t)
-            pv_t   = fcf_t * self._pv_factor(self.wacc, t)
-            pv_fcff += pv_t
-
-            fcffs.append({
-                "year":       t,
-                "revenue":    round(rev_t,    4),
-                "ebit":       round(ebit_t,   4),
-                "nopat":      round(nopat_t,  4),
-                "capex":      round(capex_t,  4),
-                "da":         round(da_t,     4),
-                "reinv_rate": round(reinv_t,  4),
-                "fcf":        round(fcf_t,    4),
-                "pv_fcf":     round(pv_t,     4),
-                "phase":      "decline",
-            })
-
-        # ── 청산 잔존 가치 (Terminal Liquidation Value) ─────────────────────
-        # 10년 후 남은 유형자산 가치 추정: D&A × terminal_multiple 기반
-        residual_asset_val = da_base * terminal_multiple * self._pv_factor(self.wacc, liquidation_years)
-        ev = pv_fcff + residual_asset_val
+        # Terminal Value 대신 잔존 자산 청산가치
+        residual_asset_val = (da_base * terminal_multiple
+                              * self._pv_factor(eff_wacc, liquidation_years))
+        ev = pv_sum + residual_asset_val
 
         extra = {
-            "stage":            "decline",
-            "g_decline":        round(g_decline,         4),
-            "capex_ratio":      capex_ratio,
-            "pv_operating":     round(pv_fcff,           4),
-            "pv_liquidation":   round(residual_asset_val, 4),
-            "terminal_g":       g_decline,
-            "note":             "No perpetuity; residual asset liquidation value applied",
+            "stage":           "decline",
+            "eff_wacc":        round(eff_wacc,          4),
+            "g_decline":       round(g_decline,          4),
+            "capex_ratio":     capex_ratio,
+            "pv_operating":    round(pv_sum,             4),
+            "pv_liquidation":  round(residual_asset_val, 4),
+            "terminal_g":      g_decline,
+            "note":            "Terminal = residual asset liquidation (no perpetuity)",
         }
         return self._equity_bridge(ev, fcffs, extra)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3. 간단한 연산 검증용 유틸 (선택 사항)
+# 3. 빠른 검증용 유틸
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _quick_sanity_check():
     """
-    삼성전자 FY2024 근사치로 결과 확인용 (단위: 조원)
+    삼성전자 FY2025 근사치로 결과 확인 (단위: 조원)
     실행: python rolling_dcf.py
     """
     fin = Financials(
-        revenue           = 300.0,   # 약 300조 매출
-        ebit              = 32.0,    # 약 32조 영업이익
-        ebit_margin       = 0.107,
-        tax_rate          = 0.22,
-        depr_amort        = 27.0,
-        capex             = 35.0,
-        change_wc         =  3.0,
-        cash_st           = 98.0,
-        debt              = 15.0,
-        minority_interest =  3.5,
-        shares            = 0.005975,  # ≈ 59.75억주 → T-shares
+        revenue           = 333.6,   # 333.6조 매출
+        ebit              = 43.6,    # 43.6조 영업이익
+        ebit_margin       = 0.131,
+        tax_rate          = 0.086,   # 실제 법인세율 8.6%
+        depr_amort        = 34.0,    # D&A 34조
+        capex             = 53.9,    # CAPEX 53.9조
+        change_wc         =  9.6,    # 운전자본 증가 9.6조
+        cash_st           = 57.9,    # 기말현금 57.9조
+        debt              = 22.0,    # 금융부채 22조
+        minority_interest = 12.0,    # 비지배지분 12조
+        shares            = 0.005970,  # 59.70억주 → T-shares
     )
 
-    engine = DamodaranDCF(fin, rf=0.035, erp=0.075, beta=1.05)
+    engine = DamodaranDCF(fin, rf=0.032, erp=0.065, beta=1.10)
 
     print("=" * 65)
-    print("  Damodaran 4-Stage Life Cycle DCF - Sanity Check")
+    print("  Damodaran 4-Stage Life Cycle DCF (단일 FCFF 공식)")
+    print("  Samsung Electronics FY2025 (단위: 조원)")
     print("=" * 65)
-    print(f"  WACC  : {engine.wacc * 100:.2f}%")
-    print(f"  CoE   : {engine.coe  * 100:.2f}%")
-    print(f"  CoD   : {engine.cod  * 100:.2f}% (after-tax)")
+    print(f"  기본 WACC : {engine.wacc * 100:.2f}%")
+    print(f"  CoE       : {engine.coe  * 100:.2f}%")
+    print(f"  CoD(세후)  : {engine.cod  * 100:.2f}%")
+    print(f"  ROIC      : {engine._base_roic() * 100:.2f}%")
+    print(f"  기본 RR   : {engine._base_reinvestment_rate() * 100:.2f}%")
     print("-" * 65)
 
-    for stage, name in [(1,"Startup"),(2,"High Growth"),(3,"Mature"),(4,"Decline")]:
-        kw = {}
-        if stage == 1:
-            kw = dict(tam=1000.0, target_share=0.15, target_margin=0.15, prob_failure=0.05)
-        res = engine.calculate_intrinsic_value(stage=stage, **kw)
-        iv  = res['intrinsic_value']
-        ev  = res['ev']
-        print(f"  Stage {stage} ({name:12s}): IV = {iv:>10,.0f} 원/주  |  EV = {ev:.1f}T")
+    stage_kwargs = {
+        1: dict(tam=2000.0, target_share=0.15, target_margin=0.20,
+                prob_failure=0.05, stage_premium=0.03),
+        2: dict(rev_cagr=0.12, g_terminal=0.025),
+        3: dict(g_stable=0.025, g_near=0.04, wacc_discount=0.005),
+        4: dict(g_decline=0.05, capex_ratio=0.40),
+    }
+    stage_names  = {1:"Startup", 2:"High Growth", 3:"Mature", 4:"Decline"}
+    stage_wacc_note = {
+        1: f"(WACC+3%p={engine.wacc*100+3:.1f}%)",
+        2: f"(WACC={engine.wacc*100:.1f}%)",
+        3: f"(WACC-0.5%p={engine.wacc*100-0.5:.1f}%)",
+        4: f"(WACC={engine.wacc*100:.1f}%)",
+    }
 
+    for stage in [1, 2, 3, 4]:
+        res = engine.calculate_intrinsic_value(stage=stage, **stage_kwargs[stage])
+        iv  = res["intrinsic_value"]
+        ev  = res["ev"]
+        eff = res.get("eff_wacc", engine.wacc)
+        print(f"  Stage {stage} ({stage_names[stage]:12s}) {stage_wacc_note[stage]:20s}: "
+              f"IV = {iv:>10,.0f} 원/주  |  EV = {ev:.1f}T")
+
+    print("=" * 65)
+    print("  현재 주가: 292,500원")
     print("=" * 65)
 
 
