@@ -609,38 +609,55 @@ def calc_valuation_band(naver_data, current_price):
     results.append(make_band("PEG", hist_peg, peg_cur, peg_est, no_theory=True))
 
     # ── PSR ──
-    shares_k = None
+    # PSR = 주가 / SPS(주당매출액)
+    # SPS(원/주) = 매출액(억원) × 1e8 / 발행주식수(주)
+    # 발행주식수(주) = FnGuide raw(천주) × 1000
+
+    # 발행주식수(주) 결정 — 실적 연도 최근값
+    shares_actual = None
     share_row = rows.get('발행주식수', [])
     for i in reversed(hist_idx):
         v = safe_float(share_row[i]) if i < len(share_row) else None
-        if v and v > 1e6:
-            shares_k = v / 1000
+        if v and v > 1e5:          # 천주 단위 → 10만 이상이면 유효
+            shares_actual = v * 1e3  # 천주 → 주
             break
-    if shares_k is None:
-        shares_k = 5919638
+    # fallback: 지배주주지분(억원) / BPS(원) 역산
+    if shares_actual is None:
+        eq_v  = get_val(rows, '지배주주지분', idx_25)
+        bps_v = get_val(rows, 'BPS', idx_25)
+        if eq_v and bps_v and bps_v > 0:
+            shares_actual = eq_v * 1e8 / bps_v
 
-    rev_row = rows.get('매출액', [])
-
-    def sps(rev_val):
-        if rev_val and shares_k and shares_k > 0:
-            return round(rev_val / shares_k * 1e5, 0)
+    def calc_sps(rev_val):
+        """매출액(억원) → SPS(원/주)"""
+        if rev_val and rev_val > 0 and shares_actual and shares_actual > 0:
+            return round(rev_val * 1e8 / shares_actual, 0)
         return None
 
+    # 역사 PSR: rows['PSR']에 이미 계산된 값 있으면 그대로 사용
+    psr_row  = rows.get('PSR', [])
     hist_psr = []
     for i in hist_idx:
-        per_i = get_val(rows,'PER',i)
-        eps_i = safe_float(eps_row[i]) if i < len(eps_row) else None
-        rev_i = get_val(rows,'매출액',i)
-        if per_i and eps_i and eps_i > 0 and rev_i and rev_i > 0:
-            price_i = per_i * eps_i
-            sps_i   = sps(rev_i)
-            if sps_i and sps_i > 0:
-                hist_psr.append(round(price_i / sps_i, 2))
+        # 1순위: 이미 계산된 PSR 값
+        psr_i = safe_float(psr_row[i]) if i < len(psr_row) else None
+        if psr_i is None or psr_i <= 0:
+            # 2순위: PER × EPS / SPS 직접 계산
+            per_i = get_val(rows, 'PER', i)
+            eps_i = get_val(rows, 'EPS', i)
+            rev_i = get_val(rows, '매출액', i)
+            sps_i = calc_sps(rev_i)
+            if per_i and eps_i and eps_i > 0 and sps_i and sps_i > 0:
+                psr_i = round(per_i * eps_i / sps_i, 2)
+        if psr_i and psr_i > 0:
+            hist_psr.append(psr_i)
 
-    sps_cur  = sps(get_val(rows,'매출액',idx_25))
-    sps_est  = sps(get_val(rows,'매출액',idx_26e))
-    psr_cur  = round(current_price/sps_cur,  2) if current_price and sps_cur  else None
-    psr_est  = round(current_price/sps_est, 2) if current_price and sps_est else None
+    # 현재/추정 SPS
+    sps_cur = calc_sps(get_val(rows, '매출액', idx_25))
+    sps_est = calc_sps(get_val(rows, '매출액', idx_26e))
+
+    # 현재가 기준 PSR (밴드의 현재 위치)
+    psr_cur = round(current_price / sps_cur, 2) if current_price and sps_cur else None
+    psr_est = round(current_price / sps_est, 2) if current_price and sps_est else None
     if psr_cur is not None and psr_cur <= 0: psr_cur = None
     if psr_est is not None and psr_est <= 0: psr_est = None
 
