@@ -684,64 +684,120 @@ def calc_rolling_dcf(naver_data, rf, current_price, stock_code=None, life_cycle=
                     shares_raw = None
         shares_T = (shares_raw / 1e12) if shares_raw else (5e8 / 1e12)  # fallback 5억주
 
-        # FnGuide 상세 파싱 (D&A, 비지배지분, 단기투자자산)
-        st_invest_T = 0.0
-        minority_T  = 0.0
+        # ── FnGuide 상세 파싱 (현금, D&A, 비지배지분, CAPEX, 부채 등) ──────
+        st_invest_T  = 0.0
+        minority_T   = 0.0
         depr_amort_T = 0.0
-        capex_T = rev_latest * 0.05 # Fallback
-        change_wc_T = 0.0
-        
+        capex_T      = rev_latest * 0.05   # Fallback: 매출의 5%
+        change_wc_T  = 0.0
+        cash_fg_T    = 0.0   # FnGuide BS 현금
+        debt_fg_T    = 0.0   # FnGuide BS 총차입금
+
         try:
-            fg_url = f"https://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp?pGB=1&gicode=A{stock_code}"
-            fg_resp = requests.get(fg_url, headers=NAVER_HEADERS, timeout=10)
+            fg_url = (f"https://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp"
+                      f"?pGB=1&gicode=A{stock_code}&cID=&MenuYn=Y&ReportGB="
+                      f"&NewMenuID=104&stkGb=701")
+            fg_resp = requests.get(fg_url, headers=NAVER_HEADERS, timeout=15)
             fg_resp.encoding = 'utf-8'
             fg_tables = pd.read_html(fg_resp.text)
-            
-            is_df_fg = fg_tables[0]
-            bs_df_fg = fg_tables[2]
-            cf_df_fg = fg_tables[4]
-            
-            def get_fg_val(df, row_name):
-                row = df[df.iloc[:, 0].str.contains(row_name, na=False)]
-                if not row.empty:
-                    v = row.iloc[:, -2].values[0]
-                    return safe_float(v)
+
+            # FnGuide 테이블 인덱스: 0=손익, 1=손익(Q), 2=재무상태, 3=재무상태(Q), 4=현금흐름, 5=현금흐름(Q)
+            bs_df_fg = fg_tables[2] if len(fg_tables) > 2 else None
+            cf_df_fg = fg_tables[4] if len(fg_tables) > 4 else None
+
+            def get_fg_val(df, *row_names):
+                """df에서 row_names 중 첫 번째 매칭 행의 최신 연간값 반환 (단위: 억원)"""
+                if df is None:
+                    return 0.0
+                for name in row_names:
+                    try:
+                        row = df[df.iloc[:, 0].str.contains(name, na=False, regex=False)]
+                        if not row.empty:
+                            # 열 2열 이상 → 마지막 연간 컬럼 우선, 없으면 최신
+                            for col_idx in range(1, min(4, len(row.columns))):
+                                v = safe_float(row.iloc[0, col_idx])
+                                if v is not None and v != 0.0:
+                                    return v
+                    except Exception:
+                        continue
                 return 0.0
 
-            st_invest_T  = to_T(get_fg_val(bs_df_fg, '단기금융상품') + get_fg_val(bs_df_fg, '단기투자자산'))
-            minority_T   = to_T(get_fg_val(bs_df_fg, '비지배지분'))
-            depr_amort_T = to_T(get_fg_val(cf_df_fg, '감가상각비') + get_fg_val(cf_df_fg, '무형자산상각비'))
-            capex_T      = to_T(abs(get_fg_val(cf_df_fg, '유형자산의취득'))) or (rev_latest * 0.05)
-            
-            # 운전자본 증감 (대략적)
-            change_wc_T  = to_T(get_fg_val(cf_df_fg, '운전자본')) or 0.0
-        except:
+            # ── 재무상태표 ──────────────────────────────────────────────────
+            if bs_df_fg is not None:
+                # 현금 및 현금성자산
+                cash_fg_T    = to_T(get_fg_val(bs_df_fg, '현금및현금성자산'))
+                # 단기금융상품 / 단기투자자산 (현금성 자산 보완)
+                st_invest_T  = to_T(
+                    (get_fg_val(bs_df_fg, '단기금융상품') or 0.0) +
+                    (get_fg_val(bs_df_fg, '단기투자자산') or 0.0) +
+                    (get_fg_val(bs_df_fg, '유동금융자산') or 0.0)
+                )
+                # 비지배지분
+                minority_T   = to_T(get_fg_val(bs_df_fg, '비지배지분'))
+                # 총차입금 = 단기차입금 + 장기차입금 + 사채
+                short_debt   = get_fg_val(bs_df_fg, '단기차입금') or 0.0
+                long_debt    = get_fg_val(bs_df_fg, '장기차입금') or 0.0
+                bonds        = get_fg_val(bs_df_fg, '사채') or 0.0
+                total_debt   = short_debt + long_debt + bonds
+                if total_debt > 0:
+                    debt_fg_T = to_T(total_debt)
+
+            # ── 현금흐름표 ──────────────────────────────────────────────────
+            if cf_df_fg is not None:
+                depr_amort_T = to_T(
+                    (get_fg_val(cf_df_fg, '감가상각비') or 0.0) +
+                    (get_fg_val(cf_df_fg, '무형자산상각비') or 0.0)
+                )
+                raw_capex    = get_fg_val(cf_df_fg, '유형자산의취득', '유형자산취득')
+                if raw_capex and abs(raw_capex) > 0:
+                    capex_T  = to_T(abs(raw_capex))
+                # 운전자본 증감 (항목이 없으면 0)
+                change_wc_T  = to_T(
+                    get_fg_val(cf_df_fg, '운전자본의변동', '운전자본변동') or 0.0
+                )
+        except Exception:
             pass
 
-        # 부채
-        bps_latest = get_val(rows, 'BPS', hist_idx[-1] if hist_idx else None)
-        debt_ratio = get_val(rows, '부채비율', hist_idx[-1] if hist_idx else None)
-        if bps_latest and shares_T > 0:
-            equity_T = bps_latest * shares_T
-            debt_T   = equity_T * (debt_ratio / 100) if debt_ratio else 0.0
+        # ── 현금 최종값: FnGuide > 네이버 순 ──────────────────────────────
+        naver_cash_T = to_T(get_latest('현금및현금성자산'))
+        # FnGuide에서 현금을 가져왔으면 FnGuide 우선
+        if cash_fg_T > 0:
+            total_cash_T = cash_fg_T + st_invest_T
+        elif naver_cash_T > 0:
+            total_cash_T = naver_cash_T + st_invest_T
         else:
-            debt_T = 0.0
+            # 최후 fallback: 매출의 10% (현금성 자산 최소 추정)
+            total_cash_T = rev_latest * 0.10
 
-        # 유효세율
+        # ── 부채 최종값: FnGuide > 네이버 BPS 역산 ────────────────────────
+        if debt_fg_T > 0:
+            debt_T = debt_fg_T
+        else:
+            bps_latest = get_val(rows, 'BPS', hist_idx[-1] if hist_idx else None)
+            debt_ratio = get_val(rows, '부채비율', hist_idx[-1] if hist_idx else None)
+            if bps_latest and shares_T > 0:
+                equity_T = bps_latest * shares_T
+                debt_T   = equity_T * (debt_ratio / 100) if debt_ratio else 0.0
+            else:
+                debt_T = 0.0
+
+        # ── 유효세율 ────────────────────────────────────────────────────────
         tax_before = get_latest('법인세비용차감전계속사업이익')
         tax_exp    = get_latest('법인세비용')
-        tax_rate   = (tax_exp / tax_before) if tax_before and tax_before > 0 else 0.22
-        tax_rate   = max(0.0, min(tax_rate, 0.30))
+        if tax_before and tax_before > 0 and tax_exp and tax_exp > 0:
+            tax_rate = max(0.05, min(tax_exp / tax_before, 0.35))
+        else:
+            tax_rate = 0.22   # 한국 법인세 기본값
 
         fin = Financials(
             revenue           = rev_latest,
             ebit              = op_latest,
             ebit_margin       = ebit_margin,
             tax_rate          = tax_rate,
-            depr_amort        = depr_amort_T,
+            depr_amort        = depr_amort_T if depr_amort_T > 0 else rev_latest * 0.03,
             capex             = capex_T,
             change_wc         = change_wc_T,
-            cash_st           = to_T(get_latest('현금및현금성자산')) + st_invest_T,
+            cash_st           = total_cash_T,
             debt              = debt_T,
             minority_interest = minority_T,
             shares            = shares_T

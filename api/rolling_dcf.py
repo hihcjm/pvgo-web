@@ -89,6 +89,7 @@ class DamodaranDCF:
     _GUARD_REINV_MIN  = -0.5    # 재투자율 하한 (쇠퇴기 포함)
     _GUARD_REINV_MAX  =  0.95   # 재투자율 상한
     _GUARD_ROIC_FLOOR =  0.001  # ROIC 하한 (0 나눗셈 방지)
+    _GUARD_ROIC_CAP   =  0.80   # ROIC 상한 80% — 경자산·플랫폼 기업 허용
 
     def __init__(
         self,
@@ -186,44 +187,33 @@ class DamodaranDCF:
         """
         ROIC = NOPAT / Invested Capital
 
-        Invested Capital 추정 (3가지 방법 중 최대값 사용):
-          1. D&A 기반 자산 역산: D&A × 상각연수(7년) → 총자산 프록시
-             - 자본집약적 기업(반도체·중공업 등 D&A 大)에 적합
-             - D&A가 클수록 IC도 크게 반영 → ROIC 과대 방지
-          2. 매출 배수: revenue × 0.8 (자산회전율 1.25x 가정)
-             - 일반 제조/서비스업 기본값
-          3. 부채+자본 장부 프록시: debt + equity_proxy
-             - equity_proxy = NOPAT / (CoE - rf) 역산 불가 시 생략
+        Invested Capital 추정 방법 (min 선택):
+          1. D&A 기반 : D&A × 7년 → 유형·무형자산 장부가 역산
+             - 반도체·중공업 등 자본집약 기업에 적합
+          2. 매출 기반 : revenue × 0.3 (자산회전율 3.3x — 경자산·서비스 기업)
+             - revenue × 0.5 에서 0.3으로 조정: 경자산 기업 IC 과대 추정 방지
 
-        [수정 전 문제]
-          (CapEx - D&A) * 5 + revenue * 0.25 공식은
-          CapEx ≈ D&A인 기업(SK하이닉스 등)에서 IC를 극단적으로 과소추정
-          → ROIC 69%처럼 비현실적 수치 발생 → g 과대 → 재투자율 클램프
-          → 오히려 FCFF가 적게 계산되는 역설 발생
+        min() 선택 이유:
+          - IC를 작게 잡을수록 ROIC가 높아지므로, 과대 평가를 막기 위해
+            더 보수적인(큰) IC 쪽을 선택해야 함.
+          - 단, D&A×7이 과도하게 크게 나오는 자본집약 기업에서는
+            매출 기반이 현실적인 하한 역할을 함.
+          → 두 값 중 max를 사용: 더 큰 IC → 더 낮은 ROIC → 보수적 추정
+
+        ROIC 상한 80%:
+          - 다모다란 실증치: 최상위 플랫폼·소프트웨어 기업 50~80% 수준
+          - 기존 40% 캡은 경자산 기업에서 g를 과소평가하는 주요 원인이었음
         """
         nopat = self._nopat()
         da    = max(self.fin.depr_amort, 1e-9)
 
-        # IC 추정: max(D&A × 5년, 매출 × 0.5)
-        #
-        # D&A × 5 : 총 유형·무형자산 장부가 역산 (평균 상각연수 5년 가정)
-        #   - 반도체·중공업 등 D&A 大 자본집약 기업에 주효
-        #   - 예) SK하이닉스 D&A 20조 → IC 100조 → ROIC 18% (실제 22%에 근접)
-        # 매출 × 0.5 : 자산회전율 2.0x 기반 IC 하한
-        #   - 경자산(light-asset) 기업에서 D&A가 작을 때 IC 과소 방지
-        # 두 값의 max → 어느 업종이든 한쪽은 현실적 IC를 잡아줌
-        #
-        # [수정 전 문제 요약]
-        #   (CapEx - D&A) * 5 + Rev * 0.25 공식:
-        #   CapEx ≈ D&A인 기업에서 (CapEx-D&A) ≈ 0 → IC = Rev*0.25만 남음
-        #   → IC 과소 → ROIC 50%+ 비현실적 → g 클램프 → FCFF 왜곡
-        ic_da_based  = da * 5.0              # D&A 기반 (자산회전 중심 업종)
-        ic_rev_based = self.fin.revenue * 0.5  # 매출 기반 (경자산 업종 하한)
+        # IC 추정
+        ic_da_based  = da * 7.0                  # D&A 기반 (상각연수 7년, 자본집약 업종)
+        ic_rev_based = self.fin.revenue * 0.3    # 매출 기반 (자산회전율 3.3x, 경자산 업종)
         ic   = max(ic_da_based, ic_rev_based, 1e-9)
         roic = nopat / ic
 
-        # ROIC 상한 40%: 초과 시 IC 추정 오류 가능성, 다모다란 실증 범위
-        return min(max(roic, self._GUARD_ROIC_FLOOR), 0.40)
+        return min(max(roic, self._GUARD_ROIC_FLOOR), self._GUARD_ROIC_CAP)
 
     @staticmethod
     def _pv_factor(wacc: float, t: int) -> float:
