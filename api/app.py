@@ -558,45 +558,43 @@ def calc_valuation_band(naver_data, current_price):
                               base_cur=bps_cur, base_est=bps_est, base_label="BPS"))
 
     # ── PEG ──
-    def calc_peg(per_val, eps_idx):
+    def calc_eps_cagr_skip_neg(end_idx):
         """
-        PEG = PER / (EPS CAGR × 100)
-
-        CAGR 계산 규칙:
-        - 기준 연도(eps_idx) EPS가 양수여야 함
-        - 시작 연도(es) EPS도 양수여야 함
-        - 시작~기준 구간 사이에 음수 EPS가 단 1개라도 있으면 해당 구간 제외
-          → 연속된 양수 구간만 CAGR 계산에 사용 (가장 먼 유효 구간 우선)
+        EPS CAGR 계산 — 음수 연도를 건너뛰고 양수 연도끼리만 사용.
+        end_idx 기준으로 가장 먼 양수 EPS 시작점을 찾아 CAGR 반환.
+        반환: cagr (소수) or None
         """
-        if per_val is None or per_val <= 0:
-            return None
-        ee = safe_float(eps_row[eps_idx]) if eps_idx is not None and eps_idx < len(eps_row) else None
+        ee = safe_float(eps_row[end_idx]) if end_idx < len(eps_row) else None
         if not ee or ee <= 0:
             return None
 
-        # 가장 먼 시작점부터 탐색 (더 긴 CAGR 기간 우선)
-        for s in range(max(0, eps_idx - 5), eps_idx):
-            es = safe_float(eps_row[s]) if s < len(eps_row) else None
-            if not es or es <= 0:
-                continue  # 시작 연도 EPS 음수 → 스킵
+        # 과거 양수 EPS 인덱스 목록 (end_idx 제외, 오래된 것 우선)
+        pos_indices = [
+            s for s in range(max(0, end_idx - 6), end_idx)
+            if s < len(eps_row) and (safe_float(eps_row[s]) or 0) > 0
+        ]
+        if not pos_indices:
+            return None
 
-            # 시작~기준 구간 내 모든 EPS가 양수인지 검사
-            all_positive = all(
-                (safe_float(eps_row[k]) or 0) > 0
-                for k in range(s, eps_idx + 1)
-                if k < len(eps_row)
-            )
-            if not all_positive:
-                continue  # 구간 내 음수 EPS 존재 → 이 구간 제외
-
-            n = eps_idx - s
+        # 가장 먼 시작점(가장 긴 기간)부터 시도
+        for s in pos_indices:
+            es = safe_float(eps_row[s])
+            n = end_idx - s
             if n <= 0:
                 continue
-            cagr = (ee / es) ** (1 / n) - 1
+            cagr = (ee / es) ** (1.0 / n) - 1.0
             if cagr > 0:
-                return round(per_val / (cagr * 100), 2)
-
+                return cagr
         return None
+
+    def calc_peg(per_val, eps_idx):
+        """PEG = PER / (EPS CAGR × 100). 음수 연도 건너뜀."""
+        if per_val is None or per_val <= 0:
+            return None
+        cagr = calc_eps_cagr_skip_neg(eps_idx)
+        if cagr is None:
+            return None
+        return round(per_val / (cagr * 100), 2)
 
     hist_peg = [calc_peg(get_val(rows, 'PER', i), i) for i in hist_idx]
     hist_peg = [v for v in hist_peg if v is not None and v > 0]
