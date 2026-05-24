@@ -740,7 +740,7 @@ def calc_eps_valuations(fin_data, r, current_price):
       1. EPS/r          : 내재가치 = EPS / r
       2. RIM            : 내재가치 = BPS × (ROE / r)
                           ROE는 FnGuide 정수 % (e.g. 11) → 소수 변환 후 계산
-      3. 벤저민 그레이엄 : 내재가치 = EPS × (8.5 + 2×g)
+      3. 벤저민 그레이엄 : 내재가치 = EPS × (8.5 + 2×g) × (1 - r)
                           g = 실적 연도 EPS CAGR (연간 %, 소수)
     r: 요구수익률 소수 (e.g. 0.138)
     """
@@ -789,12 +789,12 @@ def calc_eps_valuations(fin_data, r, current_price):
             if current_price and current_price > 0:
                 gap_rim = round((val_rim - current_price) / current_price * 100, 1)
 
-        # 3. 벤저민 그레이엄: EPS × (8.5 + 2×g)
-        #    g는 실적 EPS CAGR(소수), 적자 EPS 연도는 '-' 표시
+        # 3. 벤저민 그레이엄: EPS × (8.5 + 2×g) × (1 - r)
+        #    g는 ROE 평균(소수), 적자 EPS 연도는 '-' 표시
         val_graham = None
         gap_graham = None
-        if eps > 0 and graham_g is not None:
-            val_graham = round(eps * (8.5 + 2 * graham_g * 100))
+        if eps > 0 and graham_g is not None and r and r > 0:
+            val_graham = round(eps * (8.5 + 2 * graham_g * 100) * (1 - r))
             if current_price and current_price > 0:
                 gap_graham = round((val_graham - current_price) / current_price * 100, 1)
 

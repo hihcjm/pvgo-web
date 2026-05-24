@@ -715,9 +715,9 @@
   <div class="card">
     <div class="card-header">📊 벤저민 그레이엄 내재가치
       <span style="font-size:11px;font-weight:400;color:#718096;margin-left:8px;">
-        내재가치 = EPS × (8.5 + 2×g)
+        내재가치 = EPS × (8.5 + 2×g) × (1 − r)
         {% if vl.graham_g is not none %}
-        &nbsp;·&nbsp; g = {{ vl.graham_g }}% (실적 EPS CAGR)
+        &nbsp;·&nbsp; g = {{ vl.graham_g }}% (ROE 평균)
         {% endif %}
       </span>
     </div>
@@ -752,8 +752,8 @@
       </table>
     </div>
     <p style="padding:0 20px 12px;color:#a0aec0;font-size:11px;">
-      내재가치 = EPS × (8.5 + 2×g) · 8.5 = 무성장 기업 기본 PER · g = 실적 연도 EPS CAGR(%, 0~30% 클램프)
-      · EPS 적자 연도 제외 · 괴리율 양수(▲) = 저평가, 음수(▼) = 고평가 · 연한 배경 = 컨센서스 추정치(E)
+      내재가치 = EPS × (8.5 + 2×g) × (1 − r) · 8.5 = 무성장 기업 기본 PER · g = ROE 평균(%, 0~30% 클램프)
+      · r = 요구수익률 · EPS 적자 연도 제외 · 괴리율 양수(▲) = 저평가, 음수(▼) = 고평가 · 연한 배경 = 컨센서스 추정치(E)
     </p>
   </div>
 
